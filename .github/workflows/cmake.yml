@@ -78,11 +78,11 @@ jobs:
           wget http://ftp.gnu.org/gnu/make/make-4.2.tar.gz
           tar -xzvf make-4.2.tar.gz
           cd make-4.2
-          sudo ./configure
-          sudo make
-          sudo make install
-          sudo rm -rf /usr/bin/make
-          sudo cp ./make /usr/bin/
+          ./configure
+          make
+          make install
+          rm -rf /usr/bin/make
+          cp ./make /usr/bin/
           yum install -y bison
       - name: Update glibc
         run: |

@@ -80,5 +80,5 @@ set_target_properties(alsoft.fmt PROPERTIES ${ALSOFT_STD_VERSION_PROPS}
 
 if (MSVC)
   # Unicode support requires compiling with /utf-8.
-  target_compile_options(alsoft.fmt PUBLIC $<$<COMPILE_LANGUAGE:CXX>:/utf-8>)
+  target_compile_options(alsoft.fmt PUBLIC $<$<COMPILE_LANGUAGE:CXX>:/utf-8 /MT>)
 endif ()

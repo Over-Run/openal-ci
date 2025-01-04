@@ -73,9 +73,8 @@ jobs:
           strip build/libopenal.so
       - name: Update dependencies
         run: |
-          yum -y install wget gcc
-          scl enable devtoolset-11 bash
-          source /opt/rh/devtoolset-11/enable
+          yum -y install wget
+          source scl_source enable devtoolset-11 || true
           wget http://ftp.gnu.org/gnu/make/make-4.2.tar.gz
           tar -xzvf make-4.2.tar.gz
           cd make-4.2
@@ -87,6 +86,7 @@ jobs:
           yum install -y bison
       - name: Update glibc
         run: |
+          source scl_source enable devtoolset-11 || true
           wget http://ftp.gnu.org/gnu/glibc/glibc-2.28.tar.gz
           tar -xf glibc-2.28.tar.gz -C /usr/local/
           cd /usr/local/glibc-2.28/

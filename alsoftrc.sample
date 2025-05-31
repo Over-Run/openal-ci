@@ -56,7 +56,7 @@
 #  Sets the default output channel configuration. If left unspecified, one will
 #  try to be detected from the system, with a fallback to stereo. The available
 #  values are: mono, stereo, quad, surround51, surround61, surround71,
-#  surround714, surround3d71, ambi1, ambi2, ambi3. Note that the ambi*
+#  surround714, surround3d71, ambi1, ambi2, ambi3, ambi4. Note that the ambi*
 #  configurations output ambisonic channels of the given order (using ACN
 #  ordering and SN3D normalization by default), which need to be decoded to
 #  play correctly on speakers.
@@ -189,7 +189,11 @@
 #            between 24 and 48 points, with anti-aliasing)
 #  fast_bsinc24 - same as bsinc24, except without interpolation between down-
 #                 sampling scales
-#resampler = gaussian
+#  bsinc48 - extrapolates samples using a band-limited Sinc filter (48 points,
+#            with anti-aliasing)
+#  fast_bsinc48 - same as bsinc48, except without interpolation between down-
+#                 sampling scales
+#resampler = spline
 
 ## rt-prio: (global)
 #  Sets the real-time priority value for the mixing thread. Not all drivers may
@@ -638,9 +642,17 @@
 #  THIS WILL OVERWRITE EXISTING FILES WITHOUT QUESTION!
 #file =
 
+## format: (global)
+#  Specifies the output file format. Available options:
+#  wav - Microsoft RIFF WAVE with WAVE_FORMAT_EXTENSIBLE format.
+#  caf - Apple Core Audio Format
+#  When outputing ambisonic format (one of the ambi* channel configurations),
+#  wav will be .amb format and caf will be .ambix format.
+#format = wav
+
 ## bformat: (global)
-#  Creates AMB format files using first-order ambisonics instead of a standard
-#  single- or multi-channel .wav file.
+#  Creates .amb (for wav) or .ambix (for caf) format files using B-Format
+#  instead of a standard single- or multi-channel .wav file.
 #bformat = false
 
 ##
@@ -651,6 +663,11 @@
 ## enable: (global)
 #  Sets whether to enable EAX extensions or not.
 #enable = true
+
+## trace-commits: (global)
+#  Sets whether log EAX property commits with trace messages. This can
+#  significantly increase the amount of log messages for apps that use EAX.
+#trace-commits = false
 
 ##
 ## Per-game compatibility options (these should only be set in per-game config

@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <string_view>
 #include <utility>
+#include <variant>
 
 #include "AL/al.h"
 #include "AL/alc.h"
@@ -17,6 +18,7 @@
 #include "almalloc.h"
 #include "alnumeric.h"
 #include "core/buffer_storage.h"
+#include "intrusive_ptr.h"
 #include "vector.h"
 
 #if ALSOFT_EAX
@@ -31,7 +33,15 @@ enum class EaxStorage : uint8_t {
 struct ALbuffer : public BufferStorage {
     ALbitfieldSOFT Access{0u};
 
-    al::vector<std::byte,16> mDataStorage;
+    std::variant<al::vector<uint8_t,16>,
+        al::vector<int16_t,16>,
+        al::vector<int32_t,16>,
+        al::vector<float,16>,
+        al::vector<double,16>,
+        al::vector<MulawSample,16>,
+        al::vector<AlawSample,16>,
+        al::vector<IMA4Data,16>,
+        al::vector<MSADPCMData,16>> mDataStorage;
 
     ALuint OriginalSize{0};
 
@@ -47,10 +57,18 @@ struct ALbuffer : public BufferStorage {
     ALuint mLoopEnd{0u};
 
     /* Number of times buffer was attached to a source (deletion can only occur when 0) */
-    std::atomic<ALuint> ref{0u};
+    std::atomic<ALuint> mRef{0u};
 
     /* Self ID */
     ALuint id{0};
+
+    auto inc_ref() noexcept { return mRef.fetch_add(1, std::memory_order_acq_rel)+1; }
+    auto dec_ref() noexcept { return mRef.fetch_sub(1, std::memory_order_acq_rel)-1; }
+    auto newReference() noexcept
+    {
+        mRef.fetch_add(1, std::memory_order_acq_rel);
+        return al::intrusive_ptr{this};
+    }
 
     static void SetName(ALCcontext *context, ALuint id, std::string_view name);
 

@@ -2,11 +2,9 @@
 #define INTRUSIVE_PTR_H
 
 #include <atomic>
+#include <concepts>
 #include <cstddef>
 #include <utility>
-
-#include "atomic.h"
-#include "opthelpers.h"
 
 
 namespace al {
@@ -19,11 +17,11 @@ protected:
     ~intrusive_ref() = default;
 
 public:
-    unsigned int add_ref() noexcept { return IncrementRef(mRef); }
+    unsigned int inc_ref() noexcept { return mRef.fetch_add(1, std::memory_order_acq_rel)+1; }
     unsigned int dec_ref() noexcept
     {
-        auto ref = DecrementRef(mRef);
-        if(ref == 0) UNLIKELY
+        auto ref = mRef.fetch_sub(1, std::memory_order_acq_rel)-1;
+        if(ref == 0) [[unlikely]]
             delete static_cast<T*>(this);
         return ref;
     }
@@ -51,36 +49,35 @@ public:
 };
 
 
-template<typename T> /* NOLINTNEXTLINE(clazy-rule-of-three) False positive */
+template<typename T>
 class intrusive_ptr {
     T *mPtr{nullptr};
 
 public:
-    intrusive_ptr() noexcept = default;
-    intrusive_ptr(const intrusive_ptr &rhs) noexcept : mPtr{rhs.mPtr}
-    { if(mPtr) mPtr->add_ref(); }
-    intrusive_ptr(intrusive_ptr&& rhs) noexcept : mPtr{rhs.mPtr}
+    constexpr intrusive_ptr() noexcept = default;
+    constexpr intrusive_ptr(const intrusive_ptr &rhs) noexcept : mPtr{rhs.mPtr}
+    { if(mPtr) mPtr->inc_ref(); }
+    constexpr intrusive_ptr(intrusive_ptr&& rhs) noexcept : mPtr{rhs.mPtr}
     { rhs.mPtr = nullptr; }
-    intrusive_ptr(std::nullptr_t) noexcept { } /* NOLINT(google-explicit-constructor) */
-    explicit intrusive_ptr(T *ptr) noexcept : mPtr{ptr} { }
-    ~intrusive_ptr() { if(mPtr) mPtr->dec_ref(); }
+    constexpr intrusive_ptr(std::nullptr_t) noexcept { } /* NOLINT(google-explicit-constructor) */
+    explicit constexpr intrusive_ptr(T *ptr) noexcept : mPtr{ptr} { }
+    constexpr ~intrusive_ptr() { if(mPtr) mPtr->dec_ref(); }
 
-    /* NOLINTBEGIN(bugprone-unhandled-self-assignment)
-     * Self-assignment is handled properly here.
-     */
-    intrusive_ptr& operator=(const intrusive_ptr &rhs) noexcept
+    constexpr auto operator=(const intrusive_ptr &rhs) noexcept -> intrusive_ptr&
     {
         static_assert(noexcept(std::declval<T*>()->dec_ref()), "dec_ref must be noexcept");
-
-        if(rhs.mPtr) rhs.mPtr->add_ref();
-        if(mPtr) mPtr->dec_ref();
-        mPtr = rhs.mPtr;
+        if(&rhs != this) [[likely]]
+        {
+            if(rhs.mPtr) rhs.mPtr->inc_ref();
+            if(mPtr) mPtr->dec_ref();
+            mPtr = rhs.mPtr;
+        }
         return *this;
     }
-    /* NOLINTEND(bugprone-unhandled-self-assignment) */
-    intrusive_ptr& operator=(intrusive_ptr&& rhs) noexcept
+    constexpr auto operator=(intrusive_ptr&& rhs) noexcept -> intrusive_ptr&
     {
-        if(&rhs != this) LIKELY
+        static_assert(noexcept(std::declval<T*>()->dec_ref()), "dec_ref must be noexcept");
+        if(&rhs != this) [[likely]]
         {
             if(mPtr) mPtr->dec_ref();
             mPtr = std::exchange(rhs.mPtr, nullptr);
@@ -88,24 +85,31 @@ public:
         return *this;
     }
 
-    explicit operator bool() const noexcept { return mPtr != nullptr; }
+    explicit constexpr operator bool() const noexcept { return mPtr != nullptr; }
 
-    [[nodiscard]] auto operator*() const noexcept -> T& { return *mPtr; }
-    [[nodiscard]] auto operator->() const noexcept -> T* { return mPtr; }
-    [[nodiscard]] auto get() const noexcept -> T* { return mPtr; }
+    template<typename U=T> requires std::equality_comparable_with<T*,U*>
+    constexpr auto operator==(const intrusive_ptr<U> &rhs) const noexcept -> bool
+    { return mPtr == rhs.mPtr; }
 
-    void reset(T *ptr=nullptr) noexcept
+    [[nodiscard]] constexpr auto operator*() const noexcept -> T& { return *mPtr; }
+    [[nodiscard]] constexpr auto operator->() const noexcept -> T* { return mPtr; }
+    [[nodiscard]] constexpr auto get() const noexcept -> T* { return mPtr; }
+
+    constexpr void reset(T *ptr=nullptr) noexcept
     {
+        static_assert(noexcept(std::declval<T*>()->dec_ref()), "dec_ref must be noexcept");
         if(mPtr)
             mPtr->dec_ref();
         mPtr = ptr;
     }
 
-    T* release() noexcept { return std::exchange(mPtr, nullptr); }
+    constexpr auto release() noexcept -> T* { return std::exchange(mPtr, nullptr); }
 
-    void swap(intrusive_ptr &rhs) noexcept { std::swap(mPtr, rhs.mPtr); }
-    void swap(intrusive_ptr&& rhs) noexcept { std::swap(mPtr, rhs.mPtr); }
+    constexpr void swap(intrusive_ptr &rhs) noexcept { std::swap(mPtr, rhs.mPtr); }
 };
+
+template<typename T>
+void swap(intrusive_ptr<T> &lhs, intrusive_ptr<T> &rhs) noexcept { lhs.swap(rhs); }
 
 } // namespace al
 

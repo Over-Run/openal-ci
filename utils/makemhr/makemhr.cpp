@@ -66,6 +66,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cassert>
 #include <chrono>
 #include <cmath>
 #include <complex>
@@ -73,22 +74,22 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <filesystem>
 #include <fstream>
-#include <functional>
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <numbers>
 #include <numeric>
+#include <span>
 #include <string_view>
 #include <thread>
 #include <vector>
 
 #include "alcomplex.h"
-#include "alnumbers.h"
+#include "almalloc.h"
 #include "alnumeric.h"
-#include "alspan.h"
 #include "alstring.h"
+#include "filesystem.h"
 #include "fmt/core.h"
 #include "loaddef.h"
 #include "loadsofa.h"
@@ -170,7 +171,7 @@ auto StrSubst(std::string_view in, const std::string_view pat, const std::string
 
     while(in.size() >= pat.size())
     {
-        if(al::starts_with(in, pat))
+        if(in.starts_with(pat))
         {
             in = in.substr(pat.size());
             ret += rep;
@@ -194,12 +195,6 @@ auto StrSubst(std::string_view in, const std::string_view pat, const std::string
  *** Math routines ***
  *********************/
 
-// Simple clamp routine.
-double Clamp(const double val, const double lower, const double upper)
-{
-    return std::min(std::max(val, lower), upper);
-}
-
 inline uint dither_rng(uint *seed)
 {
     *seed = *seed * 96314165 + 907633515;
@@ -208,7 +203,7 @@ inline uint dither_rng(uint *seed)
 
 // Performs a triangular probability density function dither. The input samples
 // should be normalized (-1 to +1).
-void TpdfDither(const al::span<double> out, const al::span<const double> in, const double scale,
+void TpdfDither(const std::span<double> out, const std::span<const double> in, const double scale,
     const size_t channel, const size_t step, uint *seed)
 {
     static constexpr double PRNG_SCALE = 1.0 / std::numeric_limits<uint>::max();
@@ -227,7 +222,7 @@ void TpdfDither(const al::span<double> out, const al::span<const double> in, con
  * process.
  */
 void LimitMagnitudeResponse(const uint n, const uint m, const double limit,
-    const al::span<double> inout)
+    const std::span<double> inout)
 {
     const double halfLim{limit / 2.0};
     // Convert the response to dB.
@@ -242,7 +237,7 @@ void LimitMagnitudeResponse(const uint n, const uint m, const double limit,
     ave /= upper - lower + 1;
     // Keep the response within range of the average magnitude.
     for(uint i{0};i < m;++i)
-        inout[i] = Clamp(inout[i], ave - halfLim, ave + halfLim);
+        inout[i] = std::clamp(inout[i], ave - halfLim, ave + halfLim);
     // Convert the response back to linear magnitude.
     for(uint i{0};i < m;++i)
         inout[i] = std::pow(10.0, inout[i] / 20.0);
@@ -253,7 +248,7 @@ void LimitMagnitudeResponse(const uint n, const uint m, const double limit,
  * residuals (which were discarded).  The mirrored half of the response is
  * reconstructed.
  */
-void MinimumPhase(const al::span<double> mags, const al::span<complex_d> out)
+void MinimumPhase(const std::span<double> mags, const std::span<complex_d> out)
 {
     assert(mags.size() == out.size());
     const size_t m{(mags.size()/2) + 1};
@@ -313,7 +308,7 @@ auto StoreMhr(const HrirDataT *hData, const std::string_view filename) -> bool
     const uint n{hData->mIrPoints};
     uint dither_seed{22222};
 
-    auto ostream = std::ofstream{std::filesystem::u8path(filename), std::ios::binary};
+    auto ostream = fs::ofstream{fs::path(al::char_as_u8(filename)), std::ios::binary};
     if(!ostream.is_open())
     {
         fmt::println(stderr, "\nError: Could not open MHR file '{}'.", filename);
@@ -361,7 +356,7 @@ auto StoreMhr(const HrirDataT *hData, const std::string_view filename) -> bool
                 const size_t numsamples{size_t{channels} * n};
                 for(size_t i{0};i < numsamples;i++)
                 {
-                    const auto v = static_cast<int>(Clamp(out[i], -scale-1.0, scale));
+                    const auto v = static_cast<int>(std::clamp(out[i], -scale-1.0, scale));
                     if(!WriteBin4(bps, static_cast<uint32_t>(v), ostream, filename))
                         return false;
                 }
@@ -442,17 +437,14 @@ void BalanceFieldMagnitudes(const HrirDataT *hData, const uint channels, const u
  * on its coverage volume.  All volumes are centered at the spherical HRIR
  * coordinates and measured by extruded solid angle.
  */
-void CalculateDfWeights(const HrirDataT *hData, const al::span<double> weights)
+void CalculateDfWeights(const HrirDataT *hData, const std::span<double> weights)
 {
-    double sum, innerRa, outerRa, evs, ev, upperEv, lowerEv;
-    double solidAngle, solidVolume;
-    uint fi, ei;
-
-    sum = 0.0;
+    auto sum = 0.0;
     // The head radius acts as the limit for the inner radius.
-    innerRa = hData->mRadius;
-    for(fi = 0;fi < hData->mFds.size();fi++)
+    auto innerRa = hData->mRadius;
+    for(auto fi = 0u;fi < hData->mFds.size();++fi)
     {
+        auto outerRa = 10.0;
         // Each volume ends half way between progressive field measurements.
         if((fi + 1) < hData->mFds.size())
             outerRa = 0.5f * (hData->mFds[fi].mDistance + hData->mFds[fi + 1].mDistance);
@@ -462,19 +454,19 @@ void CalculateDfWeights(const HrirDataT *hData, const al::span<double> weights)
             outerRa = 10.0f;
 
         const double raPowDiff{std::pow(outerRa, 3.0) - std::pow(innerRa, 3.0)};
-        evs = al::numbers::pi / 2.0 / static_cast<double>(hData->mFds[fi].mEvs.size() - 1);
-        for(ei = hData->mFds[fi].mEvStart;ei < hData->mFds[fi].mEvs.size();ei++)
+        const auto evs = std::numbers::pi/2.0/static_cast<double>(hData->mFds[fi].mEvs.size() - 1);
+        for(auto ei = hData->mFds[fi].mEvStart;ei < hData->mFds[fi].mEvs.size();++ei)
         {
             const auto &elev = hData->mFds[fi].mEvs[ei];
             // For each elevation, calculate the upper and lower limits of
             // the patch band.
-            ev = elev.mElevation;
-            lowerEv = std::max(-al::numbers::pi / 2.0, ev - evs);
-            upperEv = std::min(al::numbers::pi / 2.0, ev + evs);
+            auto ev = elev.mElevation;
+            auto lowerEv = std::max(-std::numbers::pi / 2.0, ev - evs);
+            auto upperEv = std::min(std::numbers::pi / 2.0, ev + evs);
             // Calculate the surface area of the patch band.
-            solidAngle = 2.0 * al::numbers::pi * (std::sin(upperEv) - std::sin(lowerEv));
+            auto solidAngle = 2.0 * std::numbers::pi * (std::sin(upperEv) - std::sin(lowerEv));
             // Then the volume of the extruded patch band.
-            solidVolume = solidAngle * raPowDiff / 3.0;
+            auto solidVolume = solidAngle * raPowDiff / 3.0;
             // Each weight is the volume of one extruded patch.
             weights[(fi*MAX_EV_COUNT) + ei] = solidVolume / static_cast<double>(elev.mAzs.size());
             // Sum the total coverage volume of the HRIRs for all fields.
@@ -484,11 +476,11 @@ void CalculateDfWeights(const HrirDataT *hData, const al::span<double> weights)
         innerRa = outerRa;
     }
 
-    for(fi = 0;fi < hData->mFds.size();fi++)
+    for(auto fi = 0u;fi < hData->mFds.size();++fi)
     {
         // Normalize the weights given the total surface coverage for all
         // fields.
-        for(ei = hData->mFds[fi].mEvStart;ei < hData->mFds[fi].mEvs.size();ei++)
+        for(auto ei = hData->mFds[fi].mEvStart;ei < hData->mFds[fi].mEvs.size();++ei)
             weights[(fi * MAX_EV_COUNT) + ei] /= sum;
     }
 }
@@ -499,7 +491,7 @@ void CalculateDfWeights(const HrirDataT *hData, const al::span<double> weights)
  * specified magnitude range (in positive dB; 0.0 to skip).
  */
 void CalculateDiffuseFieldAverage(const HrirDataT *hData, const uint channels, const uint m,
-    const bool weighted, const double limit, const al::span<double> dfa)
+    const bool weighted, const double limit, const std::span<double> dfa)
 {
     std::vector<double> weights(hData->mFds.size() * MAX_EV_COUNT);
     uint count;
@@ -561,7 +553,7 @@ void CalculateDiffuseFieldAverage(const HrirDataT *hData, const uint channels, c
 
 // Perform diffuse-field equalization on the magnitude responses of the HRIR
 // set using the given average response.
-void DiffuseFieldEqualize(const uint channels, const uint m, const al::span<const double> dfa,
+void DiffuseFieldEqualize(const uint channels, const uint m, const std::span<const double> dfa,
     const HrirDataT *hData)
 {
     for(size_t fi{0};fi < hData->mFds.size();++fi)
@@ -584,16 +576,15 @@ void DiffuseFieldEqualize(const uint channels, const uint m, const al::span<cons
  * the two HRIRs that bound the coordinate along with a factor for
  * calculating the continuous HRIR using interpolation.
  */
-void CalcAzIndices(const HrirFdT &field, const uint ei, const double az, uint *a0, uint *a1, double *af)
+void CalcAzIndices(const HrirEvT &elev, const double az, uint *a0, uint *a1, double *af)
 {
-    double f{(2.0*al::numbers::pi + az) * static_cast<double>(field.mEvs[ei].mAzs.size()) /
-        (2.0*al::numbers::pi)};
-    const uint i{static_cast<uint>(f) % static_cast<uint>(field.mEvs[ei].mAzs.size())};
+    auto f = (std::numbers::inv_pi*0.5*az + 1.0) * static_cast<double>(elev.mAzs.size());
+    const auto fact = std::modf(f, &f);
 
-    f -= std::floor(f);
+    const auto i = static_cast<uint>(f) % static_cast<uint>(elev.mAzs.size());
     *a0 = i;
-    *a1 = (i + 1) % static_cast<uint>(field.mEvs[ei].mAzs.size());
-    *af = f;
+    *a1 = (i+1) % static_cast<uint>(elev.mAzs.size());
+    *af = fact;
 }
 
 /* Synthesize any missing onset timings at the bottom elevations of each field.
@@ -630,15 +621,16 @@ void SynthesizeOnsets(HrirDataT *hData)
 
                 for(uint ai{0u};ai < field.mEvs[ei].mAzs.size();ai++)
                 {
-                    uint a0, a1;
+                    uint a0;
+                    uint a1;
                     double af;
 
                     /* Rotate this current azimuth by a half-circle, and lookup
                      * the mirrored elevation to find the indices for the polar
                      * opposite position (may need blending).
                      */
-                    const double az{field.mEvs[ei].mAzs[ai].mAzimuth + al::numbers::pi};
-                    CalcAzIndices(field, topElev, az, &a0, &a1, &af);
+                    const double az{field.mEvs[ei].mAzs[ai].mAzimuth + std::numbers::pi};
+                    CalcAzIndices(field.mEvs[topElev], az, &a0, &a1, &af);
 
                     /* Blend the delays, and again, swap the ears. */
                     field.mEvs[ei].mAzs[ai].mDelays[0] = Lerp(
@@ -659,7 +651,8 @@ void SynthesizeOnsets(HrirDataT *hData)
 
                 for(uint ai{0u};ai < field.mEvs[ei].mAzs.size();ai++)
                 {
-                    uint a0, a1;
+                    uint a0;
+                    uint a1;
                     double af;
 
                     /* For mono data sets, mirror the azimuth front<->back
@@ -669,9 +662,9 @@ void SynthesizeOnsets(HrirDataT *hData)
                      * measurement).
                      */
                     double az{field.mEvs[ei].mAzs[ai].mAzimuth};
-                    if(az <= al::numbers::pi) az = al::numbers::pi - az;
-                    else az = (al::numbers::pi*2.0)-az + al::numbers::pi;
-                    CalcAzIndices(field, topElev, az, &a0, &a1, &af);
+                    if(az <= std::numbers::pi) az = std::numbers::pi - az;
+                    else az = (std::numbers::pi*2.0)-az + std::numbers::pi;
+                    CalcAzIndices(field.mEvs[topElev], az, &a0, &a1, &af);
 
                     field.mEvs[ei].mAzs[ai].mDelays[0] = Lerp(
                         field.mEvs[topElev].mAzs[a0].mDelays[0],
@@ -692,12 +685,16 @@ void SynthesizeOnsets(HrirDataT *hData)
 
             for(uint ai{0u};ai < field.mEvs[ei].mAzs.size();ai++)
             {
-                uint a0, a1, a2, a3;
-                double af0, af1;
+                uint a0;
+                uint a1;
+                uint a2;
+                uint a3;
+                double af0;
+                double af1;
 
                 double az{field.mEvs[ei].mAzs[ai].mAzimuth};
-                CalcAzIndices(field, upperElevReal, az, &a0, &a1, &af0);
-                CalcAzIndices(field, lowerElevFake, az, &a2, &a3, &af1);
+                CalcAzIndices(field.mEvs[upperElevReal], az, &a0, &a1, &af0);
+                CalcAzIndices(field.mEvs[lowerElevFake], az, &a2, &a3, &af1);
                 std::array<double,4> blend{{
                     (1.0-ef) * (1.0-af0),
                     (1.0-ef) * (    af0),
@@ -739,7 +736,8 @@ void SynthesizeHrirs(HrirDataT *hData)
 
         for(uint ti{0u};ti < channels;ti++)
         {
-            uint a0, a1;
+            uint a0;
+            uint a1;
             double af;
 
             /* Use the lowest immediate-left response for the left ear and
@@ -748,7 +746,7 @@ void SynthesizeHrirs(HrirDataT *hData)
              * and vice-versa, this produces a decent phantom-center response
              * underneath the head.
              */
-            CalcAzIndices(field, oi, al::numbers::pi / ((ti==0) ? -2.0 : 2.0), &a0, &a1, &af);
+            CalcAzIndices(field.mEvs[oi], std::numbers::pi/((ti==0) ? -2.0 : 2.0), &a0, &a1, &af);
             for(uint i{0u};i < m;i++)
             {
                 field.mEvs[0].mAzs[0].mIrs[ti][i] = Lerp(field.mEvs[oi].mAzs[a0].mIrs[ti][i],
@@ -785,10 +783,11 @@ void SynthesizeHrirs(HrirDataT *hData)
 
             for(uint ai{0u};ai < field.mEvs[ei].mAzs.size();ai++)
             {
-                uint a0, a1;
+                uint a0;
+                uint a1;
                 double af;
 
-                CalcAzIndices(field, oi, field.mEvs[ei].mAzs[ai].mAzimuth, &a0, &a1, &af);
+                CalcAzIndices(field.mEvs[oi], field.mEvs[ei].mAzs[ai].mAzimuth, &a0, &a1, &af);
                 for(uint ti{0u};ti < channels;ti++)
                 {
                     for(uint i{0u};i < m;i++)
@@ -839,9 +838,9 @@ void SynthesizeHrirs(HrirDataT *hData)
  * or more threads (sharing the same reconstructor object).
  */
 struct HrirReconstructor {
-    std::vector<al::span<double>> mIrs;
-    std::atomic<size_t> mCurrent{};
-    std::atomic<size_t> mDone{};
+    std::vector<std::span<double>> mIrs;
+    std::atomic<size_t> mCurrent;
+    std::atomic<size_t> mDone;
     uint mFftSize{};
     uint mIrPoints{};
 
@@ -940,11 +939,11 @@ void NormalizeHrirs(HrirDataT *hData)
 
     /* Find the maximum amplitude and RMS out of all the IRs. */
     struct LevelPair { double amp, rms; };
-    auto mesasure_channel = [irSize](const LevelPair levels, al::span<const double> ir)
+    auto mesasure_channel = [irSize](const LevelPair levels, std::span<const double> ir)
     {
         /* Calculate the peak amplitude and RMS of this IR. */
         ir = ir.first(irSize);
-        auto current = std::accumulate(ir.cbegin(), ir.cend(), LevelPair{0.0, 0.0},
+        auto current = std::accumulate(ir.begin(), ir.end(), LevelPair{0.0, 0.0},
             [](const LevelPair cur, const double impulse)
             {
                 return LevelPair{std::max(std::abs(impulse), cur.amp), cur.rms + impulse*impulse};
@@ -957,9 +956,9 @@ void NormalizeHrirs(HrirDataT *hData)
     auto measure_azi = [channels,mesasure_channel](const LevelPair levels, const HrirAzT &azi)
     { return std::accumulate(azi.mIrs.begin(), azi.mIrs.begin()+channels, levels, mesasure_channel); };
     auto measure_elev = [measure_azi](const LevelPair levels, const HrirEvT &elev)
-    { return std::accumulate(elev.mAzs.cbegin(), elev.mAzs.cend(), levels, measure_azi); };
+    { return std::accumulate(elev.mAzs.begin(), elev.mAzs.end(), levels, measure_azi); };
     auto measure_field = [measure_elev](const LevelPair levels, const HrirFdT &field)
-    { return std::accumulate(field.mEvs.cbegin(), field.mEvs.cend(), levels, measure_elev); };
+    { return std::accumulate(field.mEvs.begin(), field.mEvs.end(), levels, measure_elev); };
 
     const auto maxlev = std::accumulate(hData->mFds.begin(), hData->mFds.end(),
         LevelPair{0.0, 0.0}, measure_field);
@@ -979,11 +978,10 @@ void NormalizeHrirs(HrirDataT *hData)
     factor = std::min(factor, 0.99/maxlev.amp);
 
     /* Now scale all IRs by the given factor. */
-    auto proc_channel = [irSize,factor](al::span<double> ir)
+    auto proc_channel = [irSize,factor](std::span<double> ir)
     {
         ir = ir.first(irSize);
-        std::transform(ir.cbegin(), ir.cend(), ir.begin(),
-            [factor](double s) { return s * factor; });
+        std::transform(ir.begin(), ir.end(), ir.begin(), [factor](double s) { return s*factor; });
     };
     auto proc_azi = [channels,proc_channel](HrirAzT &azi)
     { std::for_each(azi.mIrs.begin(), azi.mIrs.begin()+channels, proc_channel); };
@@ -998,12 +996,10 @@ void NormalizeHrirs(HrirDataT *hData)
 // Calculate the left-ear time delay using a spherical head model.
 double CalcLTD(const double ev, const double az, const double rad, const double dist)
 {
-    double azp, dlp, l, al;
-
-    azp = std::asin(std::cos(ev) * std::sin(az));
-    dlp = std::sqrt((dist*dist) + (rad*rad) + (2.0*dist*rad*sin(azp)));
-    l = std::sqrt((dist*dist) - (rad*rad));
-    al = (0.5 * al::numbers::pi) + azp;
+    auto azp = std::asin(std::cos(ev) * std::sin(az));
+    auto dlp = std::sqrt((dist*dist) + (rad*rad) + (2.0*dist*rad*sin(azp)));
+    auto l = std::sqrt((dist*dist) - (rad*rad));
+    auto al = (0.5 * std::numbers::pi) + azp;
     if(dlp > l)
         dlp = l + (rad * (al - std::acos(rad / dist)));
     return dlp / 343.3;
@@ -1092,11 +1088,12 @@ void CalculateHrtds(const HeadModelT model, const double radius, HrirDataT *hDat
 } // namespace
 
 // Allocate and configure dynamic HRIR structures.
-bool PrepareHrirData(const al::span<const double> distances,
-    const al::span<const uint,MAX_FD_COUNT> evCounts,
-    const al::span<const std::array<uint,MAX_EV_COUNT>,MAX_FD_COUNT> azCounts, HrirDataT *hData)
+bool PrepareHrirData(const std::span<const double> distances,
+    const std::span<const uint,MAX_FD_COUNT> evCounts,
+    const std::span<const std::array<uint,MAX_EV_COUNT>,MAX_FD_COUNT> azCounts, HrirDataT *hData)
 {
-    uint evTotal{0}, azTotal{0};
+    auto evTotal = 0u;
+    auto azTotal = 0u;
 
     for(size_t fi{0};fi < distances.size();++fi)
     {
@@ -1117,18 +1114,18 @@ bool PrepareHrirData(const al::span<const double> distances,
     {
         hData->mFds[fi].mDistance = distances[fi];
         hData->mFds[fi].mEvStart = 0;
-        hData->mFds[fi].mEvs = al::span{hData->mEvsBase}.subspan(evTotal, evCounts[fi]);
+        hData->mFds[fi].mEvs = std::span{hData->mEvsBase}.subspan(evTotal, evCounts[fi]);
         evTotal += evCounts[fi];
         for(uint ei{0};ei < evCounts[fi];++ei)
         {
             uint azCount = azCounts[fi][ei];
 
-            hData->mFds[fi].mEvs[ei].mElevation = -al::numbers::pi / 2.0 + al::numbers::pi * ei /
-                (evCounts[fi] - 1);
-            hData->mFds[fi].mEvs[ei].mAzs = al::span{hData->mAzsBase}.subspan(azTotal, azCount);
+            hData->mFds[fi].mEvs[ei].mElevation = -std::numbers::pi / 2.0 + std::numbers::pi * ei
+                / (evCounts[fi] - 1);
+            hData->mFds[fi].mEvs[ei].mAzs = std::span{hData->mAzsBase}.subspan(azTotal, azCount);
             for(uint ai{0};ai < azCount;ai++)
             {
-                hData->mFds[fi].mEvs[ei].mAzs[ai].mAzimuth = 2.0 * al::numbers::pi * ai / azCount;
+                hData->mFds[fi].mEvs[ei].mAzs[ai].mAzimuth = 2.0 * std::numbers::pi * ai / azCount;
                 hData->mFds[fi].mEvs[ei].mAzs[ai].mIndex = azTotal + ai;
                 hData->mFds[fi].mEvs[ei].mAzs[ai].mDelays[0] = 0.0;
                 hData->mFds[fi].mEvs[ei].mAzs[ai].mDelays[1] = 0.0;
@@ -1165,7 +1162,7 @@ bool ProcessDefinition(std::string_view inName, const uint outRate, const Channe
     }
     else
     {
-        auto input = std::make_unique<std::ifstream>(std::filesystem::u8path(inName));
+        auto input = std::make_unique<fs::ifstream>(fs::path(al::char_as_u8(inName)));
         if(!input->is_open())
         {
             fmt::println(stderr, "Error: Could not open input file '{}'", inName);
@@ -1271,7 +1268,7 @@ void PrintHelp(const std::string_view argv0, FILE *ofile)
 }
 
 // Standard command line dispatch.
-int main(al::span<std::string_view> args)
+int main(std::span<std::string_view> args)
 {
     if(args.size() < 2)
     {
@@ -1509,5 +1506,5 @@ int main(int argc, char **argv)
     assert(argc >= 0);
     auto args = std::vector<std::string_view>(static_cast<unsigned int>(argc));
     std::copy_n(argv, args.size(), args.begin());
-    return main(al::span{args});
+    return main(std::span{args});
 }

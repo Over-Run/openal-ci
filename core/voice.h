@@ -8,9 +8,9 @@
 #include <cstddef>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 
-#include "alspan.h"
 #include "bufferline.h"
 #include "buffer_storage.h"
 #include "devformat.h"
@@ -102,7 +102,7 @@ struct VoiceBufferItem {
     uint mLoopStart{0u};
     uint mLoopEnd{0u};
 
-    al::span<std::byte> mSamples;
+    SampleVariant mSamples;
 
 protected:
     ~VoiceBufferItem() = default;
@@ -130,6 +130,7 @@ struct VoiceProps {
     Resampler mResampler;
     DirectMode DirectChannels;
     SpatializeMode mSpatializeMode;
+    bool mPanningEnabled;
 
     bool DryGainHFAuto;
     bool WetGainAuto;
@@ -203,27 +204,27 @@ struct SIMDALIGN Voice {
      * Source offset in samples, relative to the currently playing buffer, NOT
      * the whole queue.
      */
-    std::atomic<int> mPosition{};
+    std::atomic<int> mPosition;
     /** Fractional (fixed-point) offset to the next sample. */
-    std::atomic<uint> mPositionFrac{};
+    std::atomic<uint> mPositionFrac;
 
     /* Current buffer queue item being played. */
-    std::atomic<VoiceBufferItem*> mCurrentBuffer{};
+    std::atomic<VoiceBufferItem*> mCurrentBuffer;
 
     /* Buffer queue item to loop to at end of queue (will be NULL for non-
      * looping voices).
      */
-    std::atomic<VoiceBufferItem*> mLoopBuffer{};
+    std::atomic<VoiceBufferItem*> mLoopBuffer;
 
     std::chrono::nanoseconds mStartTime{};
 
     /* Properties for the attached buffer(s). */
     FmtChannels mFmtChannels{};
-    FmtType mFmtType{};
     uint mFrequency{};
     uint mFrameStep{}; /**< In steps of the sample type size. */
     uint mBytesPerBlock{}; /**< Or for PCM formats, BytesPerFrame. */
     uint mSamplesPerBlock{}; /**< Always 1 for PCM formats. */
+    bool mDuplicateMono{};
     AmbiLayout mAmbiLayout{};
     AmbiScaling mAmbiScaling{};
     uint mAmbiOrder{};
@@ -244,7 +245,7 @@ struct SIMDALIGN Voice {
 
     struct TargetData {
         int FilterType{};
-        al::span<FloatBufferLine> Buffer;
+        std::span<FloatBufferLine> Buffer;
     };
     TargetData mDirect;
     std::array<TargetData,MaxSendCount> mSend;

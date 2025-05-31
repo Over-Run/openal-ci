@@ -4,18 +4,19 @@
 #include "ambdec.h"
 
 #include <algorithm>
+#include <bit>
 #include <cctype>
 #include <cstdarg>
 #include <cstddef>
 #include <cstdio>
-#include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <span>
 #include <sstream>
 #include <string>
 
-#include "albit.h"
-#include "alspan.h"
+#include "alstring.h"
+#include "filesystem.h"
 #include "fmt/core.h"
 
 
@@ -60,9 +61,9 @@ AmbDecConf::~AmbDecConf() = default;
 
 std::optional<std::string> AmbDecConf::load(const char *fname) noexcept
 {
-    std::ifstream f{std::filesystem::u8path(fname)};
+    auto f = fs::ifstream{fs::path(al::char_as_u8(fname))};
     if(!f.is_open())
-        return std::string("Failed to open file \"")+fname+"\"";
+        return fmt::format("Failed to open file \"{}\"", fname);
 
     ReaderScope scope{ReaderScope::Global};
     size_t speaker_pos{0};
@@ -137,7 +138,7 @@ std::optional<std::string> AmbDecConf::load(const char *fname) noexcept
                 float value{};
                 while(mask)
                 {
-                    auto idx = static_cast<unsigned>(al::countr_zero(mask));
+                    auto idx = static_cast<unsigned>(std::countr_zero(mask));
                     mask &= ~(1u << idx);
 
                     istr >> value;
@@ -239,8 +240,8 @@ std::optional<std::string> AmbDecConf::load(const char *fname) noexcept
             if(Matrix.empty())
             {
                 Matrix.resize(Speakers.size() * FreqBands);
-                LFMatrix = al::span{Matrix}.first(Speakers.size());
-                HFMatrix = al::span{Matrix}.subspan(Speakers.size()*(FreqBands-1));
+                LFMatrix = std::span{Matrix}.first(Speakers.size());
+                HFMatrix = std::span{Matrix}.subspan(Speakers.size()*(FreqBands-1));
             }
 
             if(FreqBands == 1)

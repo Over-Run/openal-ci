@@ -60,6 +60,9 @@ if(COMMAND CMAKE_POLICY)
     if(POLICY CMP0117)
         cmake_policy(SET CMP0117 NEW)
     endif(POLICY CMP0117)
+    if(POLICY CMP0155)
+        cmake_policy(SET CMP0155 NEW)
+    endif(POLICY CMP0155)
 endif(COMMAND CMAKE_POLICY)
 
 project(OpenAL)
@@ -76,8 +79,8 @@ if(NOT CMAKE_DEBUG_POSTFIX)
 endif()
 
 set(ALSOFT_STD_VERSION_PROPS
-    # Require C++17.
-    CXX_STANDARD 17
+    # Require C++20.
+    CXX_STANDARD 20
     CXX_STANDARD_REQUIRED TRUE
     # Prefer C11, but support earlier when necessary.
     C_STANDARD 11)
@@ -93,14 +96,13 @@ include(CheckCCompilerFlag)
 include(CheckCXXCompilerFlag)
 include(CheckCSourceCompiles)
 include(CheckCXXSourceCompiles)
+include(CheckLinkerFlag)
 include(CheckStructHasMember)
 include(CMakePackageConfigHelpers)
 include(GNUInstallDirs)
 
 find_package(PkgConfig)
 find_package(SDL3 QUIET)
-
-add_subdirectory(fmt-11.0.2 EXCLUDE_FROM_ALL)
 
 option(ALSOFT_DLOPEN  "Check for the dlopen API for loading optional libs"  ON)
 
@@ -145,6 +147,23 @@ if(DEFINED ALSOFT_AMBDEC_PRESETS)
     message(WARNING "ALSOFT_AMBDEC_PRESETS is deprecated. Use ALSOFT_INSTALL_AMBDEC_PRESETS instead")
 endif()
 
+if(MSVC)
+    option(FORCE_STATIC_VCRT "Force /MT for static VC runtimes" OFF)
+    if(FORCE_STATIC_VCRT)
+        foreach(flag_var
+                CMAKE_C_FLAGS CMAKE_C_FLAGS_DEBUG CMAKE_C_FLAGS_RELEASE
+                CMAKE_C_FLAGS_MINSIZEREL CMAKE_C_FLAGS_RELWITHDEBINFO
+                CMAKE_CXX_FLAGS CMAKE_CXX_FLAGS_DEBUG CMAKE_CXX_FLAGS_RELEASE
+                CMAKE_CXX_FLAGS_MINSIZEREL CMAKE_CXX_FLAGS_RELWITHDEBINFO)
+            if(${flag_var} MATCHES "/MD")
+                string(REGEX REPLACE "/MD" "/MT" ${flag_var} "${${flag_var}}")
+            endif()
+        endforeach(flag_var)
+    endif()
+endif()
+
+add_subdirectory(fmt-11.1.4 EXCLUDE_FROM_ALL)
+
 
 set(CPP_DEFS ) # C pre-processor, not C++
 set(INC_PATHS )
@@ -155,7 +174,7 @@ set(LINKER_FLAGS_RELEASE )
 set(EXTRA_LIBS )
 
 if(WIN32)
-    set(CPP_DEFS ${CPP_DEFS} _WIN32 NOMINMAX)
+    set(CPP_DEFS ${CPP_DEFS} _WIN32 NOMINMAX WIN32_LEAN_AND_MEAN)
     if(MINGW)
         set(CPP_DEFS ${CPP_DEFS} __USE_MINGW_ANSI_STDIO)
     endif()
@@ -163,6 +182,21 @@ if(WIN32)
     option(ALSOFT_BUILD_ROUTER  "Build the router (EXPERIMENTAL; creates OpenAL32.dll and soft_oal.dll)"  OFF)
     if(MINGW)
         option(ALSOFT_BUILD_IMPORT_LIB "Build an import .lib using dlltool (requires sed)" ON)
+    endif()
+
+    if(NOT ALSOFT_UWP)
+        # Some systems may need NTDDI_VERSION defined to NTDDI_VISTA or later
+        check_c_source_compiles("#define INITGUID
+            #include <shlobj.h>
+            #include <knownfolders.h>
+            int main()
+            {
+                SHGetKnownFolderPath(&FOLDERID_RoamingAppData, KF_FLAG_DONT_UNEXPAND, NULL, NULL);
+                return 0;
+            }" HAVE_SHGETKNOWNFOLDERPATH_NO_NTDDI)
+        if(NOT HAVE_SHGETKNOWNFOLDERPATH_NO_NTDDI)
+            set(CPP_DEFS ${CPP_DEFS} NTDDI_VERSION=NTDDI_VISTA)
+        endif()
     endif()
 elseif(APPLE)
     option(ALSOFT_OSX_FRAMEWORK "Build as macOS framework" OFF)
@@ -183,7 +217,7 @@ endif()
 
 set(LIB_MAJOR_VERSION "1")
 set(LIB_MINOR_VERSION "24")
-set(LIB_REVISION "1")
+set(LIB_REVISION "3")
 set(LIB_VERSION "${LIB_MAJOR_VERSION}.${LIB_MINOR_VERSION}.${LIB_REVISION}")
 set(LIB_VERSION_NUM ${LIB_MAJOR_VERSION},${LIB_MINOR_VERSION},${LIB_REVISION},0)
 
@@ -249,33 +283,10 @@ if(MSVC)
     if(DXSDK_DIR)
         message(STATUS "Using DirectX SDK directory: ${DXSDK_DIR}")
     endif()
-
-    option(FORCE_STATIC_VCRT "Force /MT for static VC runtimes" OFF)
-    if(FORCE_STATIC_VCRT)
-        foreach(flag_var
-                CMAKE_C_FLAGS CMAKE_C_FLAGS_DEBUG CMAKE_C_FLAGS_RELEASE
-                CMAKE_C_FLAGS_MINSIZEREL CMAKE_C_FLAGS_RELWITHDEBINFO
-                CMAKE_CXX_FLAGS CMAKE_CXX_FLAGS_DEBUG CMAKE_CXX_FLAGS_RELEASE
-                CMAKE_CXX_FLAGS_MINSIZEREL CMAKE_CXX_FLAGS_RELWITHDEBINFO)
-            if(${flag_var} MATCHES "/MD")
-                string(REGEX REPLACE "/MD" "/MT" ${flag_var} "${${flag_var}}")
-            endif()
-        endforeach(flag_var)
-    endif()
 else()
     set(C_FLAGS ${C_FLAGS} -Winline -Wunused -Wall -Wextra -Wshadow -Wconversion -Wcast-align
         -Wpedantic
         $<$<COMPILE_LANGUAGE:CXX>:-Wold-style-cast -Wnon-virtual-dtor -Woverloaded-virtual>)
-
-    check_cxx_compiler_flag(-Wno-c++20-attribute-extensions HAVE_WNO_CXX20_ATTR_EXT)
-    if(HAVE_WNO_CXX20_ATTR_EXT)
-        set(C_FLAGS ${C_FLAGS} $<$<COMPILE_LANGUAGE:CXX>:-Wno-c++20-attribute-extensions>)
-    else()
-        check_cxx_compiler_flag(-Wno-c++20-extensions HAVE_WNO_CXX20_EXT)
-        if(HAVE_WNO_CXX20_EXT)
-            set(C_FLAGS ${C_FLAGS} $<$<COMPILE_LANGUAGE:CXX>:-Wno-c++20-extensions>)
-        endif()
-    endif()
 
     check_cxx_compiler_flag(-Wno-interference-size HAVE_WNO_INTERFERENCE_SIZE)
     if(HAVE_WNO_INTERFERENCE_SIZE)
@@ -589,27 +600,22 @@ endif()
 # Common sources used by both the OpenAL implementation library, the OpenAL
 # router, and certain tools and examples.
 set(COMMON_OBJS
-    common/alassert.cpp
-    common/alassert.h
     common/albit.h
     common/alcomplex.cpp
     common/alcomplex.h
     common/almalloc.h
-    common/alnumbers.h
     common/alnumeric.h
-    common/alsem.cpp
-    common/alsem.h
-    common/alspan.h
     common/alstring.cpp
     common/alstring.h
     common/althrd_setname.cpp
     common/althrd_setname.h
     common/althreads.h
-    common/altraits.h
     common/atomic.h
     common/comptr.h
     common/dynload.cpp
     common/dynload.h
+    common/filesystem.cpp
+    common/filesystem.h
     common/flexarray.h
     common/intrusive_ptr.h
     common/opthelpers.h
@@ -1275,8 +1281,8 @@ if(ALSOFT_UPDATE_BUILD_VERSION AND GIT_FOUND AND EXISTS "${OpenAL_SOURCE_DIR}/.g
 
     add_custom_target(alsoft.build_version DEPENDS "${OpenAL_BINARY_DIR}/version_witness.txt")
 else()
-    set(GIT_BRANCH "UNKNOWN")
-    set(GIT_COMMIT_HASH "unknown")
+    set(GIT_BRANCH "")
+    set(GIT_COMMIT_HASH "")
     configure_file(
         "${OpenAL_SOURCE_DIR}/version.h.in"
         "${OpenAL_BINARY_DIR}/version.h")
@@ -1302,21 +1308,30 @@ if(ALSOFT_EMBED_HRTF_DATA)
     make_hrtf_header("Default HRTF.mhr" "default_hrtf")
 endif()
 
+# Set a 16KB page size for Android
+if(ANDROID)
+    set(CPP_DEFS ${CPP_DEFS} __BIONIC_NO_PAGE_SIZE_MACRO)
+    check_linker_flag(C "-Wl,-z,max-page-size=16384" HAS_MAX_PAGE_SIZE_16384)
+    if(HAS_MAX_PAGE_SIZE_16384)
+        set(LINKER_FLAGS ${LINKER_FLAGS} "-Wl,-z,max-page-size=16384")
+    endif()
+endif()
+
 
 if(ALSOFT_UTILS)
     find_package(MySOFA)
     if(NOT ALSOFT_NO_CONFIG_UTIL)
-        find_package(Qt5Widgets QUIET)
-        if(NOT Qt5Widgets_FOUND)
-            message(STATUS "Could NOT find Qt5Widgets")
+        find_package(Qt6Widgets QUIET)
+        if(NOT Qt6Widgets_FOUND)
+            message(STATUS "Could NOT find Qt6Widgets")
         endif()
     endif()
 endif()
 if(ALSOFT_UTILS OR ALSOFT_EXAMPLES)
     find_package(SndFile)
-    if(SDL3_FOUND)
-        find_package(FFmpeg COMPONENTS AVFORMAT AVCODEC AVUTIL SWSCALE SWRESAMPLE)
-    endif()
+endif()
+if(ALSOFT_EXAMPLES AND SDL3_FOUND)
+    find_package(FFmpeg COMPONENTS AVFORMAT AVCODEC AVUTIL SWSCALE SWRESAMPLE)
 endif()
 
 if(NOT WIN32)
@@ -1384,7 +1399,9 @@ set(IMPL_TARGET OpenAL) # Either OpenAL or soft_oal.
 
 set(NEED_ANALYZE_SOURCE_FILES "")
 foreach(obj ${CORE_OBJS} ${OPENAL_OBJS} ${ALC_OBJS} ${COMMON_OBJS})
-    IF (NOT ${obj} MATCHES "${CMAKE_BINARY_DIR}/default_hrtf.txt")
+    # CMake 3.20+ can use cmake_path(COMPARE ...), or CMake 3.24+ can use
+    # PATH_EQUAL.
+    if(NOT obj STREQUAL "${CMAKE_BINARY_DIR}/default_hrtf.txt")
         list(APPEND NEED_ANALYZE_SOURCE_FILES "${CMAKE_CURRENT_SOURCE_DIR}/${obj}")
     endif()
 endforeach()

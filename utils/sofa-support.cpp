@@ -29,10 +29,12 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <span>
 #include <utility>
 #include <vector>
 
 #include "fmt/core.h"
+#include "fmt/ranges.h"
 #include "mysofa.h"
 
 
@@ -179,7 +181,7 @@ const char *SofaErrorStr(int err)
     return "Unknown";
 }
 
-auto GetCompatibleLayout(const al::span<const float> xyzs) -> std::vector<SofaField>
+auto GetCompatibleLayout(const std::span<const float> xyzs) -> std::vector<SofaField>
 {
     auto aers = std::vector<double3>(xyzs.size()/3, double3{});
     for(size_t i{0u};i < aers.size();++i)
@@ -217,11 +219,8 @@ auto GetCompatibleLayout(const al::span<const float> xyzs) -> std::vector<SofaFi
                 fmt::println("No usable elevations on field distance {:f}.", dist);
             else
             {
-                fmt::print("Non-uniform elevations on field distance {:.3f}.\nGot: {:+.2f}", dist,
-                    elevs[0]);
-                for(size_t ei{1u};ei < elevs.size();++ei)
-                    fmt::print(", {:+.2f}", elevs[ei]);
-                fmt::println("");
+                fmt::println("Non-uniform elevations on field distance {:.3f}.\nGot: {:+.2f}",
+                    dist, fmt::join(elevs, ", "));
             }
             continue;
         }

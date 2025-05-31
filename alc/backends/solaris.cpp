@@ -37,6 +37,7 @@
 #include <string.h>
 #include <vector>
 
+#include <span>
 #include <thread>
 #include <functional>
 
@@ -116,7 +117,7 @@ int SolarisBackend::mixerProc()
             continue;
         }
 
-        al::span<std::byte> buffer{mBuffer};
+        auto buffer = std::span{mBuffer};
         mDevice->renderSamples(buffer.data(), static_cast<uint>(buffer.size()/frame_size),
             frame_step);
         while(!buffer.empty() && !mKillNow.load(std::memory_order_acquire))
@@ -181,7 +182,7 @@ bool SolarisBackend::reset()
     case DevFmtUInt:
     case DevFmtFloat:
         mDevice->FmtType = DevFmtShort;
-        /* fall-through */
+        [[fallthrough]];
     case DevFmtShort:
         info.play.precision = 16;
         info.play.encoding = AUDIO_ENCODING_LINEAR;

@@ -7,8 +7,11 @@
 #include <atomic>
 #include <cstring>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <optional>
+#include <ranges>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -22,7 +25,6 @@
 #include "alc/context.h"
 #include "alc/device.h"
 #include "alnumeric.h"
-#include "alspan.h"
 #include "auxeffectslot.h"
 #include "buffer.h"
 #include "core/except.h"
@@ -194,29 +196,29 @@ constexpr auto GetDebugSeverityName(DebugSeverity severity) noexcept -> std::str
 void ALCcontext::sendDebugMessage(std::unique_lock<std::mutex> &debuglock, DebugSource source,
     DebugType type, ALuint id, DebugSeverity severity, std::string_view message)
 {
-    if(!mDebugEnabled.load(std::memory_order_relaxed)) UNLIKELY
+    if(!mDebugEnabled.load(std::memory_order_relaxed)) [[unlikely]]
         return;
 
-    if(message.length() >= MaxDebugMessageLength) UNLIKELY
+    if(message.length() >= MaxDebugMessageLength) [[unlikely]]
     {
         ERR("Debug message too long ({} >= {}):\n-> {}", message.length(),
             MaxDebugMessageLength, message);
         return;
     }
 
-    DebugGroup &debug = mDebugGroups.back();
+    auto &debug = mDebugGroups.back();
 
-    const uint64_t idfilter{(1_u64 << (DebugSourceBase+al::to_underlying(source)))
+    const auto idfilter = (1_u64 << (DebugSourceBase+al::to_underlying(source)))
         | (1_u64 << (DebugTypeBase+al::to_underlying(type)))
-        | (uint64_t{id} << 32)};
-    auto iditer = std::lower_bound(debug.mIdFilters.cbegin(), debug.mIdFilters.cend(), idfilter);
+        | (uint64_t{id} << 32);
+    const auto iditer = std::ranges::lower_bound(debug.mIdFilters, idfilter);
     if(iditer != debug.mIdFilters.cend() && *iditer == idfilter)
         return;
 
-    const uint filter{(1u << (DebugSourceBase+al::to_underlying(source)))
+    const auto filter = (1u << (DebugSourceBase+al::to_underlying(source)))
         | (1u << (DebugTypeBase+al::to_underlying(type)))
-        | (1u << (DebugSeverityBase+al::to_underlying(severity)))};
-    auto iter = std::lower_bound(debug.mFilters.cbegin(), debug.mFilters.cend(), filter);
+        | (1u << (DebugSeverityBase+al::to_underlying(severity)));
+    const auto iter = std::ranges::lower_bound(debug.mFilters, filter);
     if(iter != debug.mFilters.cend() && *iter == filter)
         return;
 
@@ -233,7 +235,7 @@ void ALCcontext::sendDebugMessage(std::unique_lock<std::mutex> &debuglock, Debug
     {
         if(mDebugLog.size() < MaxDebugLoggedMessages)
             mDebugLog.emplace_back(source, type, id, severity, message);
-        else UNLIKELY
+        else [[unlikely]]
             ERR("Debug message log overflow. Lost message:\n"
                 "  Source: {}\n"
                 "  Type: {}\n"
@@ -250,7 +252,7 @@ FORCE_ALIGN DECL_FUNCEXT2(void, alDebugMessageCallback,EXT, ALDEBUGPROCEXT,callb
 FORCE_ALIGN void AL_APIENTRY alDebugMessageCallbackDirectEXT(ALCcontext *context,
     ALDEBUGPROCEXT callback, void *userParam) noexcept
 {
-    std::lock_guard<std::mutex> debuglock{context->mDebugCbLock};
+    auto debuglock = std::lock_guard{context->mDebugCbLock};
     context->mDebugCb = callback;
     context->mDebugParam = userParam;
 }
@@ -266,24 +268,24 @@ try {
     if(!message)
         context->throw_error(AL_INVALID_VALUE, "Null message pointer");
 
-    auto msgview = (length < 0) ? std::string_view{message}
+    const auto msgview = (length < 0) ? std::string_view{message}
         : std::string_view{message, static_cast<uint>(length)};
     if(msgview.size() >= MaxDebugMessageLength)
         context->throw_error(AL_INVALID_VALUE, "Debug message too long ({} >= {})", msgview.size(),
             MaxDebugMessageLength);
 
-    auto dsource = GetDebugSource(source);
+    const auto dsource = GetDebugSource(source);
     if(!dsource)
         context->throw_error(AL_INVALID_ENUM, "Invalid debug source {:#04x}", as_unsigned(source));
     if(*dsource != DebugSource::ThirdParty && *dsource != DebugSource::Application)
         context->throw_error(AL_INVALID_ENUM, "Debug source {:#04x} not allowed",
             as_unsigned(source));
 
-    auto dtype = GetDebugType(type);
+    const auto dtype = GetDebugType(type);
     if(!dtype)
         context->throw_error(AL_INVALID_ENUM, "Invalid debug type {:#04x}", as_unsigned(type));
 
-    auto dseverity = GetDebugSeverity(severity);
+    const auto dseverity = GetDebugSeverity(severity);
     if(!dseverity)
         context->throw_error(AL_INVALID_ENUM, "Invalid debug severity {:#04x}",
             as_unsigned(severity));
@@ -319,78 +321,78 @@ try {
     if(enable != AL_TRUE && enable != AL_FALSE)
         context->throw_error(AL_INVALID_ENUM, "Invalid debug enable {}", enable);
 
-    static constexpr size_t ElemCount{DebugSourceCount + DebugTypeCount + DebugSeverityCount};
+    static constexpr auto ElemCount = DebugSourceCount + DebugTypeCount + DebugSeverityCount;
     static constexpr auto Values = make_array_sequence<uint8_t,ElemCount>();
 
-    auto srcIndices = al::span{Values}.subspan(DebugSourceBase,DebugSourceCount);
+    auto srcIdxs = std::span{Values}.subspan(DebugSourceBase,DebugSourceCount);
     if(source != AL_DONT_CARE_EXT)
     {
         auto dsource = GetDebugSource(source);
         if(!dsource)
             context->throw_error(AL_INVALID_ENUM, "Invalid debug source {:#04x}",
                 as_unsigned(source));
-        srcIndices = srcIndices.subspan(al::to_underlying(*dsource), 1);
+        srcIdxs = srcIdxs.subspan(al::to_underlying(*dsource), 1);
     }
 
-    auto typeIndices = al::span{Values}.subspan(DebugTypeBase,DebugTypeCount);
+    auto typeIdxs = std::span{Values}.subspan(DebugTypeBase,DebugTypeCount);
     if(type != AL_DONT_CARE_EXT)
     {
         auto dtype = GetDebugType(type);
         if(!dtype)
             context->throw_error(AL_INVALID_ENUM, "Invalid debug type {:#04x}", as_unsigned(type));
-        typeIndices = typeIndices.subspan(al::to_underlying(*dtype), 1);
+        typeIdxs = typeIdxs.subspan(al::to_underlying(*dtype), 1);
     }
 
-    auto svrIndices = al::span{Values}.subspan(DebugSeverityBase,DebugSeverityCount);
+    auto svrIdxs = std::span{Values}.subspan(DebugSeverityBase,DebugSeverityCount);
     if(severity != AL_DONT_CARE_EXT)
     {
         auto dseverity = GetDebugSeverity(severity);
         if(!dseverity)
             context->throw_error(AL_INVALID_ENUM, "Invalid debug severity {:#04x}",
                 as_unsigned(severity));
-        svrIndices = svrIndices.subspan(al::to_underlying(*dseverity), 1);
+        svrIdxs = svrIdxs.subspan(al::to_underlying(*dseverity), 1);
     }
 
-    std::lock_guard<std::mutex> debuglock{context->mDebugCbLock};
-    DebugGroup &debug = context->mDebugGroups.back();
+    auto debuglock = std::lock_guard{context->mDebugCbLock};
+    auto &debug = context->mDebugGroups.back();
     if(count > 0)
     {
-        const uint filterbase{(1u<<srcIndices[0]) | (1u<<typeIndices[0])};
+        const auto filterbase = (1u<<srcIdxs[0]) | (1u<<typeIdxs[0]);
 
-        for(const uint id : al::span{ids, static_cast<uint>(count)})
+        std::ranges::for_each(std::views::counted(ids, count),
+            [enable,filterbase,&debug](const uint id)
         {
-            const uint64_t filter{filterbase | (uint64_t{id} << 32)};
+            const auto filter = uint64_t{filterbase} | (uint64_t{id} << 32);
 
-            auto iter = std::lower_bound(debug.mIdFilters.cbegin(), debug.mIdFilters.cend(),
-                filter);
+            const auto iter = std::ranges::lower_bound(debug.mIdFilters, filter);
             if(!enable && (iter == debug.mIdFilters.cend() || *iter != filter))
                 debug.mIdFilters.insert(iter, filter);
             else if(enable && iter != debug.mIdFilters.cend() && *iter == filter)
                 debug.mIdFilters.erase(iter);
-        }
+        });
     }
     else
     {
-        auto apply_filter = [enable,&debug](const uint filter)
+        /* C++23 has std::views::cartesian(srcIdxs, typeIdxs, svrIdxs) for a
+         * range that gives all value combinations of the given ranges.
+         */
+        std::ranges::for_each(srcIdxs, [enable,typeIdxs,svrIdxs,&debug](const uint srcidx)
         {
-            auto iter = std::lower_bound(debug.mFilters.cbegin(), debug.mFilters.cend(), filter);
-            if(!enable && (iter == debug.mFilters.cend() || *iter != filter))
-                debug.mFilters.insert(iter, filter);
-            else if(enable && iter != debug.mFilters.cend() && *iter == filter)
-                debug.mFilters.erase(iter);
-        };
-        auto apply_severity = [apply_filter,svrIndices](const uint filter)
-        {
-            std::for_each(svrIndices.cbegin(), svrIndices.cend(),
-                [apply_filter,filter](const uint idx){ apply_filter(filter | (1<<idx)); });
-        };
-        auto apply_type = [apply_severity,typeIndices](const uint filter)
-        {
-            std::for_each(typeIndices.cbegin(), typeIndices.cend(),
-                [apply_severity,filter](const uint idx){ apply_severity(filter | (1<<idx)); });
-        };
-        std::for_each(srcIndices.cbegin(), srcIndices.cend(),
-            [apply_type](const uint idx){ apply_type(1<<idx); });
+            const auto srcfilt = 1u<<srcidx;
+            std::ranges::for_each(typeIdxs, [enable,srcfilt,svrIdxs,&debug](const uint typeidx)
+            {
+                const auto srctype = srcfilt | (1u<<typeidx);
+                std::ranges::for_each(svrIdxs, [enable,srctype,&debug](const uint svridx)
+                {
+                    const auto filter = srctype | (1u<<svridx);
+                    auto iter = std::ranges::lower_bound(debug.mFilters, filter);
+                    if(!enable && (iter == debug.mFilters.cend() || *iter != filter))
+                        debug.mFilters.insert(iter, filter);
+                    else if(enable && iter != debug.mFilters.cend() && *iter == filter)
+                        debug.mFilters.erase(iter);
+                });
+            });
+        });
     }
 }
 catch(al::base_exception&) {
@@ -406,7 +408,7 @@ FORCE_ALIGN void AL_APIENTRY alPushDebugGroupDirectEXT(ALCcontext *context, ALen
 try {
     if(length < 0)
     {
-        size_t newlen{std::strlen(message)};
+        auto newlen = std::strlen(message);
         if(newlen >= MaxDebugMessageLength)
             context->throw_error(AL_INVALID_VALUE, "Debug message too long ({} >= {})", newlen,
                 MaxDebugMessageLength);
@@ -416,14 +418,14 @@ try {
         context->throw_error(AL_INVALID_VALUE, "Debug message too long ({} >= {})", length,
             MaxDebugMessageLength);
 
-    auto dsource = GetDebugSource(source);
+    const auto dsource = GetDebugSource(source);
     if(!dsource)
         context->throw_error(AL_INVALID_ENUM, "Invalid debug source {:#04x}", as_unsigned(source));
     if(*dsource != DebugSource::ThirdParty && *dsource != DebugSource::Application)
         context->throw_error(AL_INVALID_ENUM, "Debug source {:#04x} not allowed",
             as_unsigned(source));
 
-    std::unique_lock<std::mutex> debuglock{context->mDebugCbLock};
+    auto debuglock = std::unique_lock{context->mDebugCbLock};
     if(context->mDebugGroups.size() >= MaxDebugGroupDepth)
         context->throw_error(AL_STACK_OVERFLOW_EXT, "Pushing too many debug groups");
 
@@ -448,14 +450,14 @@ catch(std::exception &e) {
 FORCE_ALIGN DECL_FUNCEXT(void, alPopDebugGroup,EXT)
 FORCE_ALIGN void AL_APIENTRY alPopDebugGroupDirectEXT(ALCcontext *context) noexcept
 try {
-    std::unique_lock<std::mutex> debuglock{context->mDebugCbLock};
+    auto debuglock = std::unique_lock{context->mDebugCbLock};
     if(context->mDebugGroups.size() <= 1)
         context->throw_error(AL_STACK_UNDERFLOW_EXT, "Attempting to pop the default debug group");
 
-    DebugGroup &debug = context->mDebugGroups.back();
+    auto &debug = context->mDebugGroups.back();
     const auto source = debug.mSource;
     const auto id = debug.mId;
-    std::string message{std::move(debug.mMessage)};
+    auto message = std::move(debug.mMessage);
 
     context->mDebugGroups.pop_back();
     if(context->mContextFlags.test(ContextFlags::DebugBit))
@@ -477,51 +479,80 @@ try {
     if(logBuf && logBufSize < 0)
         context->throw_error(AL_INVALID_VALUE, "Negative debug log buffer size");
 
-    const auto sourcesSpan = al::span{sources, sources ? count : 0u};
-    const auto typesSpan = al::span{types, types ? count : 0u};
-    const auto idsSpan = al::span{ids, ids ? count : 0u};
-    const auto severitiesSpan = al::span{severities, severities ? count : 0u};
-    const auto lengthsSpan = al::span{lengths, lengths ? count : 0u};
-    const auto logSpan = al::span{logBuf, logBuf ? static_cast<ALuint>(logBufSize) : 0u};
-
-    auto sourceiter = sourcesSpan.begin();
-    auto typeiter = typesSpan.begin();
-    auto iditer = idsSpan.begin();
-    auto severityiter = severitiesSpan.begin();
-    auto lengthiter = lengthsSpan.begin();
-    auto logiter = logSpan.begin();
-
     auto debuglock = std::lock_guard{context->mDebugCbLock};
-    for(ALuint i{0};i < count;++i)
+    /* Calculate the number of log entries to get, depending on the log buffer
+     * size (if applicable), the number of logged messages, and the requested
+     * count.
+     */
+    const auto toget = std::invoke([context,count,logBuf,logBufSize]() -> ALuint
     {
-        if(context->mDebugLog.empty())
-            return i;
-
-        auto &entry = context->mDebugLog.front();
-        const auto tocopy = size_t{entry.mMessage.size() + 1};
-        if(al::to_address(logiter) != nullptr)
+        /* NOTE: The log buffer size is relevant when the log buffer is
+         * non-NULL, including when the size is 0.
+         */
+        if(logBuf)
         {
-            if(static_cast<size_t>(std::distance(logiter, logSpan.end())) < tocopy)
-                return i;
-            logiter = std::copy(entry.mMessage.cbegin(), entry.mMessage.cend(), logiter);
-            *(logiter++) = '\0';
+            const auto logSpan = std::span{logBuf, static_cast<ALuint>(logBufSize)};
+            auto counter = 0_uz;
+            auto todo = 0u;
+            std::ignore = std::ranges::find_if(context->mDebugLog | std::views::take(count),
+                [logSpan,&counter,&todo](const DebugLogEntry &entry) noexcept -> bool
+            {
+                const auto tocopy = size_t{entry.mMessage.size() + 1};
+                if(tocopy > logSpan.size()-counter)
+                    return true;
+                counter += tocopy;
+                ++todo;
+                return false;
+            });
+            return todo;
         }
+        return static_cast<ALuint>(std::min(context->mDebugLog.size(), size_t{count}));
+    });
+    if(toget < 1)
+        return 0;
 
-        if(al::to_address(sourceiter) != nullptr)
-            *(sourceiter++) = GetDebugSourceEnum(entry.mSource);
-        if(al::to_address(typeiter) != nullptr)
-            *(typeiter++) = GetDebugTypeEnum(entry.mType);
-        if(al::to_address(iditer) != nullptr)
-            *(iditer++) = entry.mId;
-        if(al::to_address(severityiter) != nullptr)
-            *(severityiter++) = GetDebugSeverityEnum(entry.mSeverity);
-        if(al::to_address(lengthiter) != nullptr)
-            *(lengthiter++) = static_cast<ALsizei>(tocopy);
-
-        context->mDebugLog.pop_front();
+    auto logrange = context->mDebugLog | std::views::take(toget);
+    if(sources)
+        std::ranges::transform(logrange | std::views::transform(&DebugLogEntry::mSource),
+            std::span{sources, toget}.begin(), GetDebugSourceEnum);
+    if(types)
+        std::ranges::transform(logrange | std::views::transform(&DebugLogEntry::mType),
+            std::span{types, toget}.begin(), GetDebugTypeEnum);
+    if(ids)
+        std::ranges::transform(logrange, std::span{ids, toget}.begin(), &DebugLogEntry::mId);
+    if(severities)
+        std::ranges::transform(logrange | std::views::transform(&DebugLogEntry::mSeverity),
+            std::span{severities, toget}.begin(), GetDebugSeverityEnum);
+    if(lengths)
+    {
+        std::ranges::transform(logrange, std::span{lengths, toget}.begin(),
+            [](const DebugLogEntry &entry){return static_cast<ALsizei>(entry.mMessage.size()+1);});
     }
 
-    return count;
+    if(logBuf)
+    {
+        const auto logSpan = std::span{logBuf, static_cast<ALuint>(logBufSize)};
+        /* C++23...
+        std::ranges::copy(logrange | std::views::transform(&DebugLogEntry::mMessage)
+            | std::views::join_with('\0'), logSpan.begin());
+        */
+        auto logiter = logSpan.begin();
+        std::ranges::for_each(logrange, [&logiter](const std::string_view msg)
+        {
+            logiter = std::ranges::copy(msg, logiter).out;
+            *(logiter++) = '\0';
+        }, &DebugLogEntry::mMessage);
+    }
+
+    /* FIXME: Ugh. Calling erase(begin(), begin()+toget) causes an error since
+     * DebugLogEntry can't be moved/copied. Not sure how else to pop a number
+     * of elements from the front of a deque without it trying to instantiate a
+     * move/copy.
+     */
+    std::ranges::for_each(std::views::iota(0u, toget),
+        [context](auto&&){ context->mDebugLog.pop_front(); });
+
+    return toget;
 }
 catch(al::base_exception&) {
     return 0;
@@ -574,30 +605,31 @@ try {
     if(label && bufSize == 0)
         context->throw_error(AL_INVALID_VALUE, "Zero label bufSize");
 
-    const auto labelOut = al::span{label, label ? static_cast<ALuint>(bufSize) : 0u};
+    const auto labelOut = std::span{label, label ? static_cast<ALuint>(bufSize) : 0u};
     auto copy_name = [name,length,labelOut](std::unordered_map<ALuint,std::string> &names)
     {
-        std::string_view objname;
-
-        auto iter = names.find(name);
-        if(iter != names.end())
-            objname = iter->second;
+        const auto objname = std::invoke([name,&names]
+        {
+            if(auto iter = names.find(name); iter != names.end())
+                return std::string_view{iter->second};
+            return std::string_view{};
+        });
 
         if(labelOut.empty())
             *length = static_cast<ALsizei>(objname.size());
         else
         {
-            const size_t tocopy{std::min(objname.size(), labelOut.size()-1)};
-            auto oiter = std::copy_n(objname.cbegin(), tocopy, labelOut.begin());
+            const auto namerange = objname | std::views::take(labelOut.size()-1);
+            auto oiter = std::ranges::copy(namerange, labelOut.begin()).out;
             *oiter = '\0';
             if(length)
-                *length = static_cast<ALsizei>(tocopy);
+                *length = static_cast<ALsizei>(namerange.size());
         }
     };
 
     if(identifier == AL_SOURCE_EXT)
     {
-        std::lock_guard srclock{context->mSourceLock};
+        auto srclock = std::lock_guard{context->mSourceLock};
         copy_name(context->mSourceNames);
     }
     else if(identifier == AL_BUFFER)
@@ -620,7 +652,7 @@ try {
     }
     else if(identifier == AL_AUXILIARY_EFFECT_SLOT_EXT)
     {
-        std::lock_guard slotlock{context->mEffectSlotLock};
+        auto slotlock = std::lock_guard{context->mEffectSlotLock};
         copy_name(context->mEffectSlotNames);
     }
     else

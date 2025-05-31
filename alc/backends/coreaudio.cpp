@@ -27,6 +27,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <span>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -209,6 +210,7 @@ auto GetDeviceChannelCount(AudioDeviceID devId, bool isCapture) -> UInt32
     }
 
     auto buflist_data = std::make_unique<char[]>(propSize);
+    /* NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) */
     auto *buflist = reinterpret_cast<AudioBufferList*>(buflist_data.get());
 
     err = GetDevProperty(devId, kAudioDevicePropertyStreamConfiguration, isCapture, 0, propSize,
@@ -526,7 +528,7 @@ bool CoreAudioPlayback::reset()
 
     struct ChannelMap {
         DevFmtChannels fmt;
-        al::span<const AudioChannelLabel> map;
+        std::span<const AudioChannelLabel> map;
         bool is_51rear;
     };
 
@@ -550,13 +552,14 @@ bool CoreAudioPlayback::reset()
         if(err == noErr)
         {
             auto layout_data = std::make_unique<char[]>(propSize);
+            /* NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) */
             auto *layout = reinterpret_cast<AudioChannelLayout*>(layout_data.get());
 
             err = AudioUnitGetProperty(mAudioUnit, kAudioUnitProperty_AudioChannelLayout,
                 kAudioUnitScope_Output, OutputElement, layout, &propSize);
             if(err == noErr)
             {
-                auto descs = al::span{std::data(layout->mChannelDescriptions),
+                auto descs = std::span{std::data(layout->mChannelDescriptions),
                     layout->mNumberChannelDescriptions};
                 auto labels = std::vector<AudioChannelLayoutTag>(descs.size());
 
@@ -588,21 +591,21 @@ bool CoreAudioPlayback::reset()
     {
         case DevFmtUByte:
             mDevice->FmtType = DevFmtByte;
-            /* fall-through */
+            [[fallthrough]];
         case DevFmtByte:
             streamFormat.mFormatFlags |= kLinearPCMFormatFlagIsSignedInteger;
             streamFormat.mBitsPerChannel = 8;
             break;
         case DevFmtUShort:
             mDevice->FmtType = DevFmtShort;
-            /* fall-through */
+            [[fallthrough]];
         case DevFmtShort:
             streamFormat.mFormatFlags |= kLinearPCMFormatFlagIsSignedInteger;
             streamFormat.mBitsPerChannel = 16;
             break;
         case DevFmtUInt:
             mDevice->FmtType = DevFmtInt;
-            /* fall-through */
+            [[fallthrough]];
         case DevFmtInt:
             streamFormat.mFormatFlags |= kLinearPCMFormatFlagIsSignedInteger;
             streamFormat.mBitsPerChannel = 32;
@@ -690,9 +693,9 @@ struct CoreAudioCapture final : public BackendBase {
 
     SampleConverterPtr mConverter;
 
-    std::vector<char> mCaptureData;
+    std::vector<std::byte> mCaptureData;
 
-    RingBufferPtr mRing{nullptr};
+    RingBuffer2Ptr<std::byte> mRing;
 };
 
 CoreAudioCapture::~CoreAudioCapture()
@@ -725,7 +728,7 @@ OSStatus CoreAudioCapture::RecordProc(AudioUnitRenderActionFlags *ioActionFlags,
         return err;
     }
 
-    std::ignore = mRing->write(mCaptureData.data(), inNumberFrames);
+    std::ignore = mRing->write(std::span{mCaptureData}.first(inNumberFrames*size_t{mFrameSize}));
     return noErr;
 }
 
@@ -742,10 +745,8 @@ void CoreAudioCapture::open(std::string_view name)
         if(CaptureList.empty())
             EnumerateDevices(CaptureList, true);
 
-        auto find_name = [name](const DeviceEntry &entry) -> bool
-        { return entry.mName == name; };
-        auto devmatch = std::find_if(CaptureList.cbegin(), CaptureList.cend(), find_name);
-        if(devmatch == CaptureList.cend())
+        auto devmatch = std::ranges::find(CaptureList, name, &DeviceEntry::mName);
+        if(devmatch == CaptureList.end())
             throw al::backend_exception{al::backend_error::NoDevice,
                 "Device name \"{}\" not found", name};
 
@@ -946,7 +947,7 @@ void CoreAudioCapture::open(std::string_view name)
     mCaptureData.resize(outputFrameCount * mFrameSize);
 
     outputFrameCount = static_cast<UInt32>(std::max(uint64_t{outputFrameCount}, FrameCount64));
-    mRing = RingBuffer::Create(outputFrameCount, mFrameSize, false);
+    mRing = RingBuffer2<std::byte>::Create(outputFrameCount, mFrameSize, false);
 
     /* Set up sample converter if needed */
     if(outputFormat.mSampleRate != mDevice->mSampleRate)
@@ -993,21 +994,21 @@ void CoreAudioCapture::captureSamples(std::byte *buffer, uint samples)
 {
     if(!mConverter)
     {
-        std::ignore = mRing->read(buffer, samples);
+        std::ignore = mRing->read(std::span{buffer, samples*size_t{mFrameSize}});
         return;
     }
 
     auto rec_vec = mRing->getReadVector();
-    const void *src0{rec_vec[0].buf};
-    auto src0len = static_cast<uint>(rec_vec[0].len);
-    uint got{mConverter->convert(&src0, &src0len, buffer, samples)};
-    size_t total_read{rec_vec[0].len - src0len};
-    if(got < samples && !src0len && rec_vec[1].len > 0)
+    const void *src0 = rec_vec[0].data();
+    auto src0len = static_cast<uint>(rec_vec[0].size() / mFrameSize);
+    auto got = mConverter->convert(&src0, &src0len, buffer, samples);
+    auto total_read = rec_vec[0].size()/mFrameSize - src0len;
+    if(got < samples && !src0len && !rec_vec[1].empty())
     {
-        const void *src1{rec_vec[1].buf};
-        auto src1len = static_cast<uint>(rec_vec[1].len);
-        got += mConverter->convert(&src1, &src1len, buffer + got*mFrameSize, samples-got);
-        total_read += rec_vec[1].len - src1len;
+        const void *src1 = rec_vec[1].data();
+        auto src1len = static_cast<uint>(rec_vec[1].size()/mFrameSize);
+        std::ignore = mConverter->convert(&src1, &src1len, buffer + got*mFrameSize, samples-got);
+        total_read += rec_vec[1].size()/mFrameSize - src1len;
     }
 
     mRing->readAdvance(total_read);

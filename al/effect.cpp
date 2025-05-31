@@ -23,12 +23,14 @@
 #include "effect.h"
 
 #include <algorithm>
+#include <bit>
 #include <cstdint>
 #include <cstring>
 #include <iterator>
 #include <memory>
 #include <mutex>
 #include <numeric>
+#include <span>
 #include <string>
 #include <type_traits>
 #include <unordered_map>
@@ -43,13 +45,11 @@
 #include "AL/efx.h"
 
 #include "al/effects/effects.h"
-#include "albit.h"
 #include "alc/context.h"
 #include "alc/device.h"
 #include "alc/inprogext.h"
 #include "almalloc.h"
 #include "alnumeric.h"
-#include "alspan.h"
 #include "alstring.h"
 #include "core/except.h"
 #include "core/logging.h"
@@ -144,11 +144,11 @@ auto EnsureEffects(al::Device *device, size_t needed) noexcept -> bool
 try {
     size_t count{std::accumulate(device->EffectList.cbegin(), device->EffectList.cend(), 0_uz,
         [](size_t cur, const EffectSubList &sublist) noexcept -> size_t
-        { return cur + static_cast<ALuint>(al::popcount(sublist.FreeMask)); })};
+        { return cur + static_cast<ALuint>(std::popcount(sublist.FreeMask)); })};
 
     while(needed > count)
     {
-        if(device->EffectList.size() >= 1<<25) UNLIKELY
+        if(device->EffectList.size() >= 1<<25) [[unlikely]]
             return false;
 
         EffectSubList sublist{};
@@ -166,14 +166,12 @@ catch(...) {
 [[nodiscard]]
 auto AllocEffect(al::Device *device) noexcept -> ALeffect*
 {
-    auto sublist = std::find_if(device->EffectList.begin(), device->EffectList.end(),
-        [](const EffectSubList &entry) noexcept -> bool
-        { return entry.FreeMask != 0; });
+    auto sublist = std::ranges::find_if(device->EffectList, &EffectSubList::FreeMask);
     auto lidx = static_cast<ALuint>(std::distance(device->EffectList.begin(), sublist));
-    auto slidx = static_cast<ALuint>(al::countr_zero(sublist->FreeMask));
+    auto slidx = static_cast<ALuint>(std::countr_zero(sublist->FreeMask));
     ASSUME(slidx < 64);
 
-    ALeffect *effect{al::construct_at(al::to_address(sublist->Effects->begin() + slidx))};
+    auto *effect = std::construct_at(std::to_address(sublist->Effects->begin() + slidx));
     InitEffectParams(effect, AL_EFFECT_NULL);
 
     /* Add 1 to avoid effect ID 0. */
@@ -203,12 +201,12 @@ auto LookupEffect(al::Device *device, ALuint id) noexcept -> ALeffect*
     const size_t lidx{(id-1) >> 6};
     const ALuint slidx{(id-1) & 0x3f};
 
-    if(lidx >= device->EffectList.size()) UNLIKELY
+    if(lidx >= device->EffectList.size()) [[unlikely]]
         return nullptr;
     EffectSubList &sublist = device->EffectList[lidx];
-    if(sublist.FreeMask & (1_u64 << slidx)) UNLIKELY
+    if(sublist.FreeMask & (1_u64 << slidx)) [[unlikely]]
         return nullptr;
-    return al::to_address(sublist.Effects->begin() + slidx);
+    return std::to_address(sublist.Effects->begin() + slidx);
 }
 
 } // namespace
@@ -218,17 +216,17 @@ FORCE_ALIGN void AL_APIENTRY alGenEffectsDirect(ALCcontext *context, ALsizei n, 
 try {
     if(n < 0)
         context->throw_error(AL_INVALID_VALUE, "Generating {} effects", n);
-    if(n <= 0) UNLIKELY return;
+    if(n <= 0) [[unlikely]] return;
 
     auto *device = context->mALDevice.get();
     auto effectlock = std::lock_guard{device->EffectLock};
 
-    const al::span eids{effects, static_cast<ALuint>(n)};
+    const auto eids = std::span{effects, static_cast<ALuint>(n)};
     if(!EnsureEffects(device, eids.size()))
         context->throw_error(AL_OUT_OF_MEMORY, "Failed to allocate {} effect{}", n,
             (n==1) ? "" : "s");
 
-    std::generate(eids.begin(), eids.end(), [device]{ return AllocEffect(device)->id; });
+    std::ranges::generate(eids, [device]{ return AllocEffect(device)->id; });
 }
 catch(al::base_exception&) {
 }
@@ -242,27 +240,24 @@ FORCE_ALIGN void AL_APIENTRY alDeleteEffectsDirect(ALCcontext *context, ALsizei 
 try {
     if(n < 0)
         context->throw_error(AL_INVALID_VALUE, "Deleting {} effects", n);
-    if(n <= 0) UNLIKELY return;
+    if(n <= 0) [[unlikely]] return;
 
     auto *device = context->mALDevice.get();
     auto effectlock = std::lock_guard{device->EffectLock};
 
     /* First try to find any effects that are invalid. */
-    auto validate_effect = [device](const ALuint eid) -> bool
-    { return !eid || LookupEffect(device, eid) != nullptr; };
-
-    const al::span eids{effects, static_cast<ALuint>(n)};
-    auto inveffect = std::find_if_not(eids.begin(), eids.end(), validate_effect);
+    const auto eids = std::span{effects, static_cast<ALuint>(n)};
+    auto inveffect = std::ranges::find_if_not(eids, [device](const ALuint eid) -> bool
+    { return !eid || LookupEffect(device, eid) != nullptr; });
     if(inveffect != eids.end())
         context->throw_error(AL_INVALID_NAME, "Invalid effect ID {}", *inveffect);
 
     /* All good. Delete non-0 effect IDs. */
-    auto delete_effect = [device](ALuint eid) -> void
+    std::ranges::for_each(eids, [device](ALuint eid)
     {
         if(ALeffect *effect{eid ? LookupEffect(device, eid) : nullptr})
             FreeEffect(device, effect);
-    };
-    std::for_each(eids.begin(), eids.end(), delete_effect);
+    });
 }
 catch(al::base_exception&) {
 }
@@ -298,7 +293,7 @@ try {
         {
             auto check_effect = [value](const EffectList &item) -> bool
             { return value == item.val && !DisabledEffects.test(item.type); };
-            if(!std::any_of(gEffectList.cbegin(), gEffectList.cend(), check_effect))
+            if(!std::ranges::any_of(gEffectList, check_effect))
                 context->throw_error(AL_INVALID_VALUE, "Effect type {:#04x} not supported",
                     as_unsigned(value));
         }
@@ -310,8 +305,7 @@ try {
     /* Call the appropriate handler */
     std::visit([context,aleffect,param,value](auto &arg)
     {
-        using Type = std::remove_cv_t<std::remove_reference_t<decltype(arg)>>;
-        using PropType = typename Type::prop_type;
+        using PropType = typename std::remove_cvref_t<decltype(arg)>::prop_type;
         return arg.SetParami(context, std::get<PropType>(aleffect->Props), param, value);
     }, aleffect->PropsVariant);
 }
@@ -342,8 +336,7 @@ try {
     /* Call the appropriate handler */
     std::visit([context,aleffect,param,values](auto &arg)
     {
-        using Type = std::remove_cv_t<std::remove_reference_t<decltype(arg)>>;
-        using PropType = typename Type::prop_type;
+        using PropType = typename std::remove_cvref_t<decltype(arg)>::prop_type;
         return arg.SetParamiv(context, std::get<PropType>(aleffect->Props), param, values);
     }, aleffect->PropsVariant);
 }
@@ -367,8 +360,7 @@ try {
     /* Call the appropriate handler */
     std::visit([context,aleffect,param,value](auto &arg)
     {
-        using Type = std::remove_cv_t<std::remove_reference_t<decltype(arg)>>;
-        using PropType = typename Type::prop_type;
+        using PropType = typename std::remove_cvref_t<decltype(arg)>::prop_type;
         return arg.SetParamf(context, std::get<PropType>(aleffect->Props), param, value);
     }, aleffect->PropsVariant);
 }
@@ -392,8 +384,7 @@ try {
     /* Call the appropriate handler */
     std::visit([context,aleffect,param,values](auto &arg)
     {
-        using Type = std::remove_cv_t<std::remove_reference_t<decltype(arg)>>;
-        using PropType = typename Type::prop_type;
+        using PropType = typename std::remove_cvref_t<decltype(arg)>::prop_type;
         return arg.SetParamfv(context, std::get<PropType>(aleffect->Props), param, values);
     }, aleffect->PropsVariant);
 }
@@ -424,8 +415,7 @@ try {
     /* Call the appropriate handler */
     std::visit([context,aleffect,param,value](auto &arg)
     {
-        using Type = std::remove_cv_t<std::remove_reference_t<decltype(arg)>>;
-        using PropType = typename Type::prop_type;
+        using PropType = typename std::remove_cvref_t<decltype(arg)>::prop_type;
         return arg.GetParami(context, std::get<PropType>(aleffect->Props), param, value);
     }, aleffect->PropsVariant);
 }
@@ -456,8 +446,7 @@ try {
     /* Call the appropriate handler */
     std::visit([context,aleffect,param,values](auto &arg)
     {
-        using Type = std::remove_cv_t<std::remove_reference_t<decltype(arg)>>;
-        using PropType = typename Type::prop_type;
+        using PropType = typename std::remove_cvref_t<decltype(arg)>::prop_type;
         return arg.GetParamiv(context, std::get<PropType>(aleffect->Props), param, values);
     }, aleffect->PropsVariant);
 }
@@ -481,8 +470,7 @@ try {
     /* Call the appropriate handler */
     std::visit([context,aleffect,param,value](auto &arg)
     {
-        using Type = std::remove_cv_t<std::remove_reference_t<decltype(arg)>>;
-        using PropType = typename Type::prop_type;
+        using PropType = typename std::remove_cvref_t<decltype(arg)>::prop_type;
         return arg.GetParamf(context, std::get<PropType>(aleffect->Props), param, value);
     }, aleffect->PropsVariant);
 }
@@ -506,8 +494,7 @@ try {
     /* Call the appropriate handler */
     std::visit([context,aleffect,param,values](auto &arg)
     {
-        using Type = std::remove_cv_t<std::remove_reference_t<decltype(arg)>>;
-        using PropType = typename Type::prop_type;
+        using PropType = typename std::remove_cvref_t<decltype(arg)>::prop_type;
         return arg.GetParamfv(context, std::get<PropType>(aleffect->Props), param, values);
     }, aleffect->PropsVariant);
 }
@@ -544,8 +531,8 @@ EffectSubList::~EffectSubList()
     uint64_t usemask{~FreeMask};
     while(usemask)
     {
-        const int idx{al::countr_zero(usemask)};
-        std::destroy_at(al::to_address(Effects->begin()+idx));
+        const int idx{std::countr_zero(usemask)};
+        std::destroy_at(std::to_address(Effects->begin()+idx));
         usemask &= ~(1_u64 << idx);
     }
     FreeMask = ~usemask;

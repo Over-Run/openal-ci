@@ -8,21 +8,20 @@
 #include <bitset>
 #include <cstddef>
 #include <memory>
+#include <span>
 #include <thread>
 #include <vector>
 
-#include "alsem.h"
-#include "alspan.h"
 #include "async_event.h"
 #include "atomic.h"
 #include "flexarray.h"
 #include "opthelpers.h"
+#include "ringbuffer.h"
 #include "vecmat.h"
 
 struct DeviceBase;
 struct EffectSlot;
 struct EffectSlotProps;
-struct RingBuffer;
 struct Voice;
 struct VoiceChange;
 struct VoicePropsItem;
@@ -60,7 +59,7 @@ struct ContextProps {
     bool SourceDistanceModel;
     DistanceModel mDistanceModel;
 
-    std::atomic<ContextProps*> next{};
+    std::atomic<ContextProps*> next;
 };
 
 struct ContextParams {
@@ -107,7 +106,7 @@ struct ContextBase {
      * last processed, and any after are pending.
      */
     VoiceChange *mVoiceChangeTail{};
-    std::atomic<VoiceChange*> mCurrentVoiceChange{};
+    std::atomic<VoiceChange*> mCurrentVoiceChange;
 
     void allocVoiceChanges();
     void allocVoiceProps();
@@ -118,15 +117,15 @@ struct ContextBase {
 
     using VoiceArray = al::FlexArray<Voice*>;
     al::atomic_unique_ptr<VoiceArray> mVoices;
-    std::atomic<size_t> mActiveVoiceCount{};
+    std::atomic<size_t> mActiveVoiceCount;
 
     void allocVoices(size_t addcount);
-    [[nodiscard]] auto getVoicesSpan() const noexcept -> al::span<Voice*>
+    [[nodiscard]] auto getVoicesSpan() const noexcept -> std::span<Voice*>
     {
         return {mVoices.load(std::memory_order_relaxed)->data(),
             mActiveVoiceCount.load(std::memory_order_relaxed)};
     }
-    [[nodiscard]] auto getVoicesSpanAcquired() const noexcept -> al::span<Voice*>
+    [[nodiscard]] auto getVoicesSpanAcquired() const noexcept -> std::span<Voice*>
     {
         return {mVoices.load(std::memory_order_acquire)->data(),
             mActiveVoiceCount.load(std::memory_order_acquire)};
@@ -141,8 +140,8 @@ struct ContextBase {
     al::atomic_unique_ptr<EffectSlotArray> mActiveAuxSlots;
 
     std::thread mEventThread;
-    al::semaphore mEventSem;
-    std::unique_ptr<RingBuffer> mAsyncEvents;
+    FifoBufferPtr<AsyncEvent> mAsyncEvents;
+    std::atomic<bool> mEventsPending;
     using AsyncEventBitset = std::bitset<al::to_underlying(AsyncEnableBits::Count)>;
     std::atomic<AsyncEventBitset> mEnabledEvts{0u};
 

@@ -23,6 +23,7 @@
 #include "filter.h"
 
 #include <algorithm>
+#include <bit>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -30,6 +31,7 @@
 #include <memory>
 #include <mutex>
 #include <numeric>
+#include <span>
 #include <unordered_map>
 #include <vector>
 
@@ -37,12 +39,10 @@
 #include "AL/alc.h"
 #include "AL/efx.h"
 
-#include "albit.h"
 #include "alc/context.h"
 #include "alc/device.h"
 #include "almalloc.h"
 #include "alnumeric.h"
-#include "alspan.h"
 #include "core/except.h"
 #include "core/logging.h"
 #include "direct_defs.h"
@@ -101,11 +101,11 @@ auto EnsureFilters(al::Device *device, size_t needed) noexcept -> bool
 try {
     size_t count{std::accumulate(device->FilterList.cbegin(), device->FilterList.cend(), 0_uz,
         [](size_t cur, const FilterSubList &sublist) noexcept -> size_t
-        { return cur + static_cast<ALuint>(al::popcount(sublist.FreeMask)); })};
+        { return cur + static_cast<ALuint>(std::popcount(sublist.FreeMask)); })};
 
     while(needed > count)
     {
-        if(device->FilterList.size() >= 1<<25) UNLIKELY
+        if(device->FilterList.size() >= 1<<25) [[unlikely]]
             return false;
 
         FilterSubList sublist{};
@@ -124,14 +124,12 @@ catch(...) {
 [[nodiscard]]
 auto AllocFilter(al::Device *device) noexcept -> ALfilter*
 {
-    auto sublist = std::find_if(device->FilterList.begin(), device->FilterList.end(),
-        [](const FilterSubList &entry) noexcept -> bool
-        { return entry.FreeMask != 0; });
+    auto sublist = std::ranges::find_if(device->FilterList, &FilterSubList::FreeMask);
     auto lidx = static_cast<ALuint>(std::distance(device->FilterList.begin(), sublist));
-    auto slidx = static_cast<ALuint>(al::countr_zero(sublist->FreeMask));
+    auto slidx = static_cast<ALuint>(std::countr_zero(sublist->FreeMask));
     ASSUME(slidx < 64);
 
-    ALfilter *filter{al::construct_at(al::to_address(sublist->Filters->begin() + slidx))};
+    auto *filter = std::construct_at(std::to_address(sublist->Filters->begin() + slidx));
     InitFilterParams(filter, AL_FILTER_NULL);
 
     /* Add 1 to avoid filter ID 0. */
@@ -162,12 +160,12 @@ auto LookupFilter(al::Device *device, ALuint id) noexcept -> ALfilter*
     const size_t lidx{(id-1) >> 6};
     const ALuint slidx{(id-1) & 0x3f};
 
-    if(lidx >= device->FilterList.size()) UNLIKELY
+    if(lidx >= device->FilterList.size()) [[unlikely]]
         return nullptr;
     FilterSubList &sublist = device->FilterList[lidx];
-    if(sublist.FreeMask & (1_u64 << slidx)) UNLIKELY
+    if(sublist.FreeMask & (1_u64 << slidx)) [[unlikely]]
         return nullptr;
-    return al::to_address(sublist.Filters->begin() + slidx);
+    return std::to_address(sublist.Filters->begin() + slidx);
 }
 
 } // namespace
@@ -212,13 +210,13 @@ void FilterTable<LowpassFilterTable>::setParamf(ALCcontext *context, ALfilter *f
     {
     case AL_LOWPASS_GAIN:
         if(!(val >= AL_LOWPASS_MIN_GAIN && val <= AL_LOWPASS_MAX_GAIN))
-            context->throw_error(AL_INVALID_VALUE, "Low-pass gain {:f} out of range", val);
+            context->throw_error(AL_INVALID_VALUE, "Low-pass gain {} out of range", val);
         filter->Gain = val;
         return;
 
     case AL_LOWPASS_GAINHF:
         if(!(val >= AL_LOWPASS_MIN_GAINHF && val <= AL_LOWPASS_MAX_GAINHF))
-            context->throw_error(AL_INVALID_VALUE, "Low-pass gainhf {:f} out of range", val);
+            context->throw_error(AL_INVALID_VALUE, "Low-pass gainhf {} out of range", val);
         filter->GainHF = val;
         return;
     }
@@ -263,13 +261,13 @@ void FilterTable<HighpassFilterTable>::setParamf(ALCcontext *context, ALfilter *
     {
     case AL_HIGHPASS_GAIN:
         if(!(val >= AL_HIGHPASS_MIN_GAIN && val <= AL_HIGHPASS_MAX_GAIN))
-            context->throw_error(AL_INVALID_VALUE, "High-pass gain {:f} out of range", val);
+            context->throw_error(AL_INVALID_VALUE, "High-pass gain {} out of range", val);
         filter->Gain = val;
         return;
 
     case AL_HIGHPASS_GAINLF:
         if(!(val >= AL_HIGHPASS_MIN_GAINLF && val <= AL_HIGHPASS_MAX_GAINLF))
-            context->throw_error(AL_INVALID_VALUE, "High-pass gainlf {:f} out of range", val);
+            context->throw_error(AL_INVALID_VALUE, "High-pass gainlf {} out of range", val);
         filter->GainLF = val;
         return;
     }
@@ -314,19 +312,19 @@ void FilterTable<BandpassFilterTable>::setParamf(ALCcontext *context, ALfilter *
     {
     case AL_BANDPASS_GAIN:
         if(!(val >= AL_BANDPASS_MIN_GAIN && val <= AL_BANDPASS_MAX_GAIN))
-            context->throw_error(AL_INVALID_VALUE, "Band-pass gain {:f} out of range", val);
+            context->throw_error(AL_INVALID_VALUE, "Band-pass gain {} out of range", val);
         filter->Gain = val;
         return;
 
     case AL_BANDPASS_GAINHF:
         if(!(val >= AL_BANDPASS_MIN_GAINHF && val <= AL_BANDPASS_MAX_GAINHF))
-            context->throw_error(AL_INVALID_VALUE, "Band-pass gainhf {:f} out of range", val);
+            context->throw_error(AL_INVALID_VALUE, "Band-pass gainhf {} out of range", val);
         filter->GainHF = val;
         return;
 
     case AL_BANDPASS_GAINLF:
         if(!(val >= AL_BANDPASS_MIN_GAINLF && val <= AL_BANDPASS_MAX_GAINLF))
-            context->throw_error(AL_INVALID_VALUE, "Band-pass gainlf {:f} out of range", val);
+            context->throw_error(AL_INVALID_VALUE, "Band-pass gainlf {} out of range", val);
         filter->GainLF = val;
         return;
     }
@@ -364,17 +362,17 @@ FORCE_ALIGN void AL_APIENTRY alGenFiltersDirect(ALCcontext *context, ALsizei n, 
 try {
     if(n < 0)
         context->throw_error(AL_INVALID_VALUE, "Generating {} filters", n);
-    if(n <= 0) UNLIKELY return;
+    if(n <= 0) [[unlikely]] return;
 
     auto *device = context->mALDevice.get();
     auto filterlock = std::lock_guard{device->FilterLock};
 
-    const al::span fids{filters, static_cast<ALuint>(n)};
+    const auto fids = std::span{filters, static_cast<ALuint>(n)};
     if(!EnsureFilters(device, fids.size()))
         context->throw_error(AL_OUT_OF_MEMORY, "Failed to allocate {} filter{}", n,
             (n==1) ? "" : "s");
 
-    std::generate(fids.begin(), fids.end(), [device]{ return AllocFilter(device)->id; });
+    std::ranges::generate(fids, [device]{ return AllocFilter(device)->id; });
 }
 catch(al::base_exception&) {
 }
@@ -388,27 +386,24 @@ FORCE_ALIGN void AL_APIENTRY alDeleteFiltersDirect(ALCcontext *context, ALsizei 
 try {
     if(n < 0)
         context->throw_error(AL_INVALID_VALUE, "Deleting {} filters", n);
-    if(n <= 0) UNLIKELY return;
+    if(n <= 0) [[unlikely]] return;
 
     auto *device = context->mALDevice.get();
     auto filterlock = std::lock_guard{device->FilterLock};
 
     /* First try to find any filters that are invalid. */
-    auto validate_filter = [device](const ALuint fid) -> bool
-    { return !fid || LookupFilter(device, fid) != nullptr; };
-
-    const al::span fids{filters, static_cast<ALuint>(n)};
-    auto invflt = std::find_if_not(fids.begin(), fids.end(), validate_filter);
+    const auto fids = std::span{filters, static_cast<ALuint>(n)};
+    const auto invflt = std::ranges::find_if_not(fids, [device](const ALuint fid) -> bool
+    { return !fid || LookupFilter(device, fid) != nullptr; });
     if(invflt != fids.end())
         context->throw_error(AL_INVALID_NAME, "Invalid filter ID {}", *invflt);
 
     /* All good. Delete non-0 filter IDs. */
-    auto delete_filter = [device](const ALuint fid) -> void
+    std::ranges::for_each(fids, [device](const ALuint fid)
     {
         if(ALfilter *filter{fid ? LookupFilter(device, fid) : nullptr})
             FreeFilter(device, filter);
-    };
-    std::for_each(fids.begin(), fids.end(), delete_filter);
+    });
 }
 catch(al::base_exception&) {
 }
@@ -451,7 +446,7 @@ try {
 
     /* Call the appropriate handler */
     std::visit([context,alfilt,param,value](auto&& thunk)
-        { thunk.setParami(context, alfilt, param, value); }, alfilt->mTypeVariant);
+    { thunk.setParami(context, alfilt, param, value); }, alfilt->mTypeVariant);
 }
 catch(al::base_exception&) {
 }
@@ -479,7 +474,7 @@ try {
 
     /* Call the appropriate handler */
     std::visit([context,alfilt,param,values](auto&& thunk)
-        { thunk.setParamiv(context, alfilt, param, values); }, alfilt->mTypeVariant);
+    { thunk.setParamiv(context, alfilt, param, values); }, alfilt->mTypeVariant);
 }
 catch(al::base_exception&) {
 }
@@ -500,7 +495,7 @@ try {
 
     /* Call the appropriate handler */
     std::visit([context,alfilt,param,value](auto&& thunk)
-        { thunk.setParamf(context, alfilt, param, value); }, alfilt->mTypeVariant);
+    { thunk.setParamf(context, alfilt, param, value); }, alfilt->mTypeVariant);
 }
 catch(al::base_exception&) {
 }
@@ -521,7 +516,7 @@ try {
 
     /* Call the appropriate handler */
     std::visit([context,alfilt,param,values](auto&& thunk)
-        { thunk.setParamfv(context, alfilt, param, values); }, alfilt->mTypeVariant);
+    { thunk.setParamfv(context, alfilt, param, values); }, alfilt->mTypeVariant);
 }
 catch(al::base_exception&) {
 }
@@ -547,7 +542,7 @@ try {
 
     /* Call the appropriate handler */
     std::visit([context,alfilt,param,value](auto&& thunk)
-        { thunk.getParami(context, alfilt, param, value); }, alfilt->mTypeVariant);
+    { thunk.getParami(context, alfilt, param, value); }, alfilt->mTypeVariant);
 }
 catch(al::base_exception&) {
 }
@@ -575,7 +570,7 @@ try {
 
     /* Call the appropriate handler */
     std::visit([context,alfilt,param,values](auto&& thunk)
-        { thunk.getParamiv(context, alfilt, param, values); }, alfilt->mTypeVariant);
+    { thunk.getParamiv(context, alfilt, param, values); }, alfilt->mTypeVariant);
 }
 catch(al::base_exception&) {
 }
@@ -596,7 +591,7 @@ try {
 
     /* Call the appropriate handler */
     std::visit([context,alfilt,param,value](auto&& thunk)
-        { thunk.getParamf(context, alfilt, param, value); }, alfilt->mTypeVariant);
+    { thunk.getParamf(context, alfilt, param, value); }, alfilt->mTypeVariant);
 }
 catch(al::base_exception&) {
 }
@@ -617,7 +612,7 @@ try {
 
     /* Call the appropriate handler */
     std::visit([context,alfilt,param,values](auto&& thunk)
-        { thunk.getParamfv(context, alfilt, param, values); }, alfilt->mTypeVariant);
+    { thunk.getParamfv(context, alfilt, param, values); }, alfilt->mTypeVariant);
 }
 catch(al::base_exception&) {
 }
@@ -647,8 +642,8 @@ FilterSubList::~FilterSubList()
     uint64_t usemask{~FreeMask};
     while(usemask)
     {
-        const int idx{al::countr_zero(usemask)};
-        std::destroy_at(al::to_address(Filters->begin() + idx));
+        const int idx{std::countr_zero(usemask)};
+        std::destroy_at(std::to_address(Filters->begin() + idx));
         usemask &= ~(1_u64 << idx);
     }
     FreeMask = ~usemask;

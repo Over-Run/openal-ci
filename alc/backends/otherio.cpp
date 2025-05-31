@@ -22,7 +22,6 @@
 
 #include "otherio.h"
 
-#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <winreg.h>
 
@@ -44,18 +43,19 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
 #include <deque>
 #include <future>
 #include <mutex>
+#include <span>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <vector>
 
-#include "albit.h"
 #include "alnumeric.h"
 #include "althrd_setname.h"
 #include "comptr.h"
@@ -63,6 +63,7 @@
 #include "core/device.h"
 #include "core/helpers.h"
 #include "core/logging.h"
+#include "pragmadefs.h"
 #include "strutils.h"
 
 
@@ -95,7 +96,7 @@ auto ORIO64Bit::as() const -> uint64_t { return (uint64_t{hi}<<32) | lo; }
 template<> [[nodiscard]]
 auto ORIO64Bit::as() const -> int64_t { return static_cast<int64_t>(as<uint64_t>()); }
 template<> [[nodiscard]]
-auto ORIO64Bit::as() const -> double { return al::bit_cast<double>(as<uint64_t>()); }
+auto ORIO64Bit::as() const -> double { return std::bit_cast<double>(as<uint64_t>()); }
 
 
 enum class ORIOSampleType : LONG {
@@ -185,19 +186,17 @@ struct ORIOCallbacks {
 /* COM interfaces don't include a virtual destructor in their pure-virtual
  * classes, and we can't add one without breaking ABI.
  */
-#ifdef __GNUC__
-_Pragma("GCC diagnostic push")
-_Pragma("GCC diagnostic ignored \"-Wnon-virtual-dtor\"")
-#endif
+DIAGNOSTIC_PUSH
+std_pragma("GCC diagnostic ignored \"-Wnon-virtual-dtor\"")
 /* NOLINTNEXTLINE(cppcoreguidelines-virtual-class-destructor) */
 struct ORIOiface : public IUnknown {
     STDMETHOD_(LONG, Init)(void *sysHandle) = 0;
     /* A fixed-length span should be passed exactly the same as one pointer.
      * This ensures an appropriately-sized buffer for the driver.
      */
-    STDMETHOD_(void, GetDriverName)(al::span<char,32> name) = 0;
+    STDMETHOD_(void, GetDriverName)(std::span<char,32> name) = 0;
     STDMETHOD_(LONG, GetDriverVersion)() = 0;
-    STDMETHOD_(void, GetErrorMessage)(al::span<char,124> message) = 0;
+    STDMETHOD_(void, GetErrorMessage)(std::span<char,124> message) = 0;
     STDMETHOD_(ORIOError, Start)() = 0;
     STDMETHOD_(ORIOError, Stop)() = 0;
     STDMETHOD_(ORIOError, GetChannels)(LONG *numInput, LONG *numOutput) = 0;
@@ -221,9 +220,7 @@ struct ORIOiface : public IUnknown {
     auto operator=(const ORIOiface&) -> ORIOiface& = delete;
     ~ORIOiface() = delete;
 };
-#ifdef __GNUC__
-_Pragma("GCC diagnostic pop")
-#endif
+DIAGNOSTIC_POP
 
 namespace {
 

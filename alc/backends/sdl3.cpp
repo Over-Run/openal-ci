@@ -26,30 +26,31 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include "almalloc.h"
 #include "core/device.h"
 #include "core/logging.h"
+#include "pragmadefs.h"
 
-_Pragma("GCC diagnostic push")
-_Pragma("GCC diagnostic ignored \"-Wold-style-cast\"")
+DIAGNOSTIC_PUSH
+std_pragma("GCC diagnostic ignored \"-Wold-style-cast\"")
 #include "SDL3/SDL_audio.h"
 #include "SDL3/SDL_init.h"
 #include "SDL3/SDL_stdinc.h"
-_Pragma("GCC diagnostic pop")
+
+namespace {
+constexpr auto DefaultPlaybackDeviceID = SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK;
+} /* namespace */
+DIAGNOSTIC_POP
 
 
 namespace {
 
 using namespace std::string_view_literals;
-
-_Pragma("GCC diagnostic push")
-_Pragma("GCC diagnostic ignored \"-Wold-style-cast\"")
-constexpr auto DefaultPlaybackDeviceID = SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK;
-_Pragma("GCC diagnostic pop")
-
 
 template<typename T>
 struct SdlDeleter {
@@ -77,7 +78,7 @@ void EnumeratePlaybackDevices()
         return;
     }
 
-    auto devids = al::span{devicelist.get(), static_cast<uint>(numdevs)};
+    auto devids = std::span{devicelist.get(), static_cast<uint>(numdevs)};
     auto newlist = std::vector<DeviceEntry>{};
 
     newlist.reserve(devids.size());
@@ -285,7 +286,7 @@ auto Sdl3Backend::reset() -> bool
             "Failed to get stream format: {}", SDL_GetError()};
 
     if(!mDevice->Flags.test(ChannelsRequest)
-        || (static_cast<uint>(have.channels) != mDevice->channelsFromFmt()
+        || (std::cmp_not_equal(have.channels, mDevice->channelsFromFmt())
             && !(mDevice->FmtChans == DevFmtStereo && have.channels >= 2)))
     {
         /* SDL guarantees these layouts for the given channel count. */

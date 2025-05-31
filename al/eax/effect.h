@@ -10,6 +10,8 @@
 #include "core/effects/base.h"
 #include "call.h"
 
+inline bool EaxTraceCommits{false};
+
 struct EaxEffectErrorMessages {
     static constexpr auto unknown_property_id() noexcept { return "Unknown property id."; }
     static constexpr auto unknown_version() noexcept { return "Unknown version."; }
@@ -283,7 +285,7 @@ template<> struct CommitterFromProps<EAXPITCHSHIFTERPROPERTIES> { using type = E
 template<> struct CommitterFromProps<EAXVOCALMORPHERPROPERTIES> { using type = EaxVocalMorpherCommitter; };
 
 template<typename T>
-using CommitterFor = typename CommitterFromProps<std::remove_cv_t<std::remove_reference_t<T>>>::type;
+using CommitterFor = typename CommitterFromProps<std::remove_cvref_t<T>>::type;
 
 
 class EaxEffect {

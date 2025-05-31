@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <span>
 #include <variant>
 
 #include "AL/al.h"
@@ -11,11 +12,13 @@
 
 #include "alc/context.h"
 #include "alnumeric.h"
-#include "alspan.h"
+#include "core/logging.h"
 #include "effects.h"
+#include "fmt/ranges.h"
 
 #if ALSOFT_EAX
 #include <cassert>
+
 #include "al/eax/api.h"
 #include "al/eax/call.h"
 #include "al/eax/effect.h"
@@ -237,20 +240,20 @@ void ReverbEffectHandler::SetParamf(ALCcontext *context, ReverbProps &props, ALe
 void ReverbEffectHandler::SetParamfv(ALCcontext *context, ReverbProps &props, ALenum param, const float *vals)
 {
     static constexpr auto finite_checker = [](float f) -> bool { return std::isfinite(f); };
-    al::span<const float> values;
+    auto values = std::span<const float>{};
     switch(param)
     {
     case AL_EAXREVERB_REFLECTIONS_PAN:
         values = {vals, 3_uz};
-        if(!std::all_of(values.cbegin(), values.cend(), finite_checker))
+        if(!std::all_of(values.begin(), values.end(), finite_checker))
             context->throw_error(AL_INVALID_VALUE, "EAX Reverb reflections pan out of range");
-        std::copy(values.cbegin(), values.cend(), props.ReflectionsPan.begin());
+        std::copy(values.begin(), values.end(), props.ReflectionsPan.begin());
         return;
     case AL_EAXREVERB_LATE_REVERB_PAN:
         values = {vals, 3_uz};
-        if(!std::all_of(values.cbegin(), values.cend(), finite_checker))
+        if(!std::all_of(values.begin(), values.end(), finite_checker))
             context->throw_error(AL_INVALID_VALUE, "EAX Reverb late reverb pan out of range");
-        std::copy(values.cbegin(), values.cend(), props.LateReverbPan.begin());
+        std::copy(values.begin(), values.end(), props.LateReverbPan.begin());
         return;
     }
     SetParamf(context, props, param, *vals);
@@ -298,7 +301,7 @@ void ReverbEffectHandler::GetParamf(ALCcontext *context, const ReverbProps &prop
 }
 void ReverbEffectHandler::GetParamfv(ALCcontext *context, const ReverbProps &props, ALenum param, float *vals)
 {
-    al::span<float> values;
+    auto values = std::span<float>{};
     switch(param)
     {
     case AL_EAXREVERB_REFLECTIONS_PAN:
@@ -1053,6 +1056,38 @@ bool EaxReverbCommitter::commit(const EAXREVERBPROPERTIES &props)
         ret.LFReference = props.flLFReference;
         ret.RoomRolloffFactor = props.flRoomRolloffFactor;
         ret.DecayHFLimit = ((props.ulFlags & EAXREVERBFLAGS_DECAYHFLIMIT) != 0);
+        if(EaxTraceCommits) [[unlikely]]
+        {
+            TRACE("Reverb commit:\n"
+                "  Density: {:f}\n"
+                "  Diffusion: {:f}\n"
+                "  Gain: {:f}\n"
+                "  GainHF: {:f}\n"
+                "  GainLF: {:f}\n"
+                "  DecayTime: {:f}\n"
+                "  DecayHFRatio: {:f}\n"
+                "  DecayLFRatio: {:f}\n"
+                "  ReflectionsGain: {:f}\n"
+                "  ReflectionsDelay: {:f}\n"
+                "  ReflectionsPan: {}\n"
+                "  LateReverbGain: {:f}\n"
+                "  LateReverbDelay: {:f}\n"
+                "  LateRevernPan: {}\n"
+                "  EchoTime: {:f}\n"
+                "  EchoDepth: {:f}\n"
+                "  ModulationTime: {:f}\n"
+                "  ModulationDepth: {:f}\n"
+                "  AirAbsorptionGainHF: {:f}\n"
+                "  HFReference: {:f}\n"
+                "  LFReference: {:f}\n"
+                "  RoomRolloffFactor: {:f}\n"
+                "  DecayHFLimit: {}", ret.Density, ret.Diffusion, ret.Gain, ret.GainHF, ret.GainLF,
+                ret.DecayTime, ret.DecayHFRatio, ret.DecayLFRatio, ret.ReflectionsGain,
+                ret.ReflectionsDelay, ret.ReflectionsPan, ret.LateReverbGain, ret.LateReverbDelay,
+                ret.LateReverbPan, ret.EchoTime, ret.EchoDepth, ret.ModulationTime,
+                ret.ModulationDepth, ret.AirAbsorptionGainHF, ret.HFReference, ret.LFReference,
+                ret.RoomRolloffFactor, ret.DecayHFLimit ? "true" : "false");
+        }
         return ret;
     }();
 

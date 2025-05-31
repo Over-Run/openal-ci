@@ -11,6 +11,9 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <numbers>
+#include <ranges>
+#include <span>
 #include <vector>
 
 #if HAVE_SSE_INTRINSICS
@@ -20,10 +23,7 @@
 #endif
 
 #include "alcomplex.h"
-#include "almalloc.h"
-#include "alnumbers.h"
 #include "alnumeric.h"
-#include "alspan.h"
 #include "base.h"
 #include "core/ambidefs.h"
 #include "core/bufferline.h"
@@ -38,7 +38,6 @@
 #include "core/mixer.h"
 #include "core/uhjfilter.h"
 #include "intrusive_ptr.h"
-#include "opthelpers.h"
 #include "pffft.h"
 #include "polyphase_resampler.h"
 #include "vecmat.h"
@@ -82,45 +81,34 @@ namespace {
  */
 
 
-template<FmtType SrcType>
-inline void LoadSampleArray(const al::span<float> dst, const std::byte *src,
-    const std::size_t channel, const std::size_t srcstep) noexcept
+template<typename T>
+inline void LoadSampleArray(const std::span<float> dstSamples,
+    const std::span<const T> srcData, const size_t channel, const size_t srcstep) noexcept
 {
-    using TypeTraits = al::FmtTypeTraits<SrcType>;
-    using SampleType = typename TypeTraits::Type;
-    const auto converter = TypeTraits{};
+    using TypeTraits = SampleInfo<T>;
     assert(channel < srcstep);
 
-    const auto srcspan = al::span{reinterpret_cast<const SampleType*>(src), dst.size()*srcstep};
-    auto ssrc = srcspan.cbegin();
-    std::generate(dst.begin(), dst.end(), [converter,channel,srcstep,&ssrc]
+    auto ssrc = srcData.begin() + ptrdiff_t(channel);
+    dstSamples.front() = TypeTraits::to_float(*ssrc);
+    std::ranges::generate(dstSamples | std::views::drop(1), [&ssrc,srcstep]
     {
-        const auto ret = converter(ssrc[channel]);
         ssrc += ptrdiff_t(srcstep);
-        return ret;
+        return TypeTraits::to_float(*ssrc);
     });
 }
 
-void LoadSamples(const al::span<float> dst, const std::byte *src, const size_t channel,
-    const size_t srcstep, const FmtType srctype) noexcept
+void LoadSamples(const std::span<float> dstSamples, const SampleVariant &src, const size_t channel,
+    const size_t srcstep) noexcept
 {
-#define HANDLE_FMT(T)  case T: LoadSampleArray<T>(dst, src, channel, srcstep); break
-    switch(srctype)
+    std::visit([&](auto&& splvec)
     {
-    HANDLE_FMT(FmtUByte);
-    HANDLE_FMT(FmtShort);
-    HANDLE_FMT(FmtInt);
-    HANDLE_FMT(FmtFloat);
-    HANDLE_FMT(FmtDouble);
-    HANDLE_FMT(FmtMulaw);
-    HANDLE_FMT(FmtAlaw);
-    /* FIXME: Handle ADPCM decoding here. */
-    case FmtIMA4:
-    case FmtMSADPCM:
-        std::fill(dst.begin(), dst.end(), 0.0f);
-        break;
-    }
-#undef HANDLE_FMT
+        using span_t = std::remove_cvref_t<decltype(splvec)>;
+        using sample_t = span_t::value_type;
+        if constexpr(!std::is_same_v<sample_t,IMA4Data> && !std::is_same_v<sample_t,MSADPCMData>)
+            LoadSampleArray<sample_t>(dstSamples, splvec, channel, srcstep);
+        else
+            std::ranges::fill(splvec, SampleInfo<sample_t>::silence());
+    }, src);
 }
 
 
@@ -128,33 +116,33 @@ constexpr auto GetAmbiScales(AmbiScaling scaletype) noexcept
 {
     switch(scaletype)
     {
-    case AmbiScaling::FuMa: return al::span{AmbiScale::FromFuMa};
-    case AmbiScaling::SN3D: return al::span{AmbiScale::FromSN3D};
-    case AmbiScaling::UHJ: return al::span{AmbiScale::FromUHJ};
+    case AmbiScaling::FuMa: return std::span{AmbiScale::FromFuMa};
+    case AmbiScaling::SN3D: return std::span{AmbiScale::FromSN3D};
+    case AmbiScaling::UHJ: return std::span{AmbiScale::FromUHJ};
     case AmbiScaling::N3D: break;
     }
-    return al::span{AmbiScale::FromN3D};
+    return std::span{AmbiScale::FromN3D};
 }
 
 constexpr auto GetAmbiLayout(AmbiLayout layouttype) noexcept
 {
-    if(layouttype == AmbiLayout::FuMa) return al::span{AmbiIndex::FromFuMa};
-    return al::span{AmbiIndex::FromACN};
+    if(layouttype == AmbiLayout::FuMa) return std::span{AmbiIndex::FromFuMa};
+    return std::span{AmbiIndex::FromACN};
 }
 
 constexpr auto GetAmbi2DLayout(AmbiLayout layouttype) noexcept
 {
-    if(layouttype == AmbiLayout::FuMa) return al::span{AmbiIndex::FromFuMa2D};
-    return al::span{AmbiIndex::FromACN2D};
+    if(layouttype == AmbiLayout::FuMa) return std::span{AmbiIndex::FromFuMa2D};
+    return std::span{AmbiIndex::FromACN2D};
 }
 
 
-constexpr float sin30{0.5f};
-constexpr float cos30{0.866025403785f};
-constexpr float sin45{al::numbers::sqrt2_v<float>*0.5f};
-constexpr float cos45{al::numbers::sqrt2_v<float>*0.5f};
-constexpr float sin110{ 0.939692620786f};
-constexpr float cos110{-0.342020143326f};
+constexpr auto sin30 = 0.5f;
+constexpr auto cos30 = 0.866025403785f;
+constexpr auto sin45 = std::numbers::sqrt2_v<float>*0.5f;
+constexpr auto cos45 = std::numbers::sqrt2_v<float>*0.5f;
+constexpr auto sin110 =  0.939692620786f;
+constexpr auto cos110 = -0.342020143326f;
 
 struct ChanPosMap {
     Channel channel;
@@ -168,21 +156,21 @@ constexpr size_t ConvolveUpdateSize{256};
 constexpr size_t ConvolveUpdateSamples{ConvolveUpdateSize / 2};
 
 
-void apply_fir(al::span<float> dst, const al::span<const float> input, const al::span<const float,ConvolveUpdateSamples> filter)
+void apply_fir(std::span<float> dst, std::span<const float> input,
+    const std::span<const float,ConvolveUpdateSamples> filter)
 {
-    auto src = input.begin();
 #if HAVE_SSE_INTRINSICS
-    std::generate(dst.begin(), dst.end(), [&src,filter]
+    std::generate(dst.begin(), dst.end(), [&input,filter]
     {
-        __m128 r4{_mm_setzero_ps()};
+        auto r4 = _mm_setzero_ps();
         for(size_t j{0};j < ConvolveUpdateSamples;j+=4)
         {
-            const __m128 coeffs{_mm_load_ps(&filter[j])};
-            const __m128 s{_mm_loadu_ps(&src[j])};
+            const auto coeffs = _mm_load_ps(&filter[j]);
+            const auto s = _mm_loadu_ps(&input[j]);
 
             r4 = _mm_add_ps(r4, _mm_mul_ps(s, coeffs));
         }
-        ++src;
+        input = input.subspan(1);
 
         r4 = _mm_add_ps(r4, _mm_shuffle_ps(r4, r4, _MM_SHUFFLE(0, 1, 2, 3)));
         r4 = _mm_add_ps(r4, _mm_movehl_ps(r4, r4));
@@ -191,12 +179,12 @@ void apply_fir(al::span<float> dst, const al::span<const float> input, const al:
 
 #elif HAVE_NEON
 
-    std::generate(dst.begin(), dst.end(), [&src,filter]
+    std::generate(dst.begin(), dst.end(), [&input,filter]
     {
-        float32x4_t r4{vdupq_n_f32(0.0f)};
+        auto r4 = vdupq_n_f32(0.0f);
         for(size_t j{0};j < ConvolveUpdateSamples;j+=4)
-            r4 = vmlaq_f32(r4, vld1q_f32(&src[j]), vld1q_f32(&filter[j]));
-        ++src;
+            r4 = vmlaq_f32(r4, vld1q_f32(&input[j]), vld1q_f32(&filter[j]));
+        input = input.subspan(1);
 
         r4 = vaddq_f32(r4, vrev64q_f32(r4));
         return vget_lane_f32(vadd_f32(vget_low_f32(r4), vget_high_f32(r4)), 0);
@@ -204,12 +192,12 @@ void apply_fir(al::span<float> dst, const al::span<const float> input, const al:
 
 #else
 
-    std::generate(dst.begin(), dst.end(), [&src,filter]
+    std::generate(dst.begin(), dst.end(), [&input,filter]
     {
-        float ret{0.0f};
+        auto ret = 0.0f;
         for(size_t j{0};j < ConvolveUpdateSamples;++j)
-            ret += src[j] * filter[j];
-        ++src;
+            ret += input[j] * filter[j];
+        input = input.subspan(1);
         return ret;
     });
 #endif
@@ -238,8 +226,8 @@ struct ConvolutionState final : public EffectState {
         alignas(16) FloatBufferLine mBuffer{};
         float mHfScale{}, mLfScale{};
         BandSplitter mFilter;
-        std::array<float,MaxOutputChannels> Current{};
-        std::array<float,MaxOutputChannels> Target{};
+        std::array<float,MaxAmbiChannels> Current{};
+        std::array<float,MaxAmbiChannels> Target{};
     };
     std::vector<ChannelData> mChans;
     al::vector<float,16> mComplexData;
@@ -248,32 +236,32 @@ struct ConvolutionState final : public EffectState {
     ConvolutionState() = default;
     ~ConvolutionState() override = default;
 
-    void NormalMix(const al::span<FloatBufferLine> samplesOut, const size_t samplesToDo);
-    void UpsampleMix(const al::span<FloatBufferLine> samplesOut, const size_t samplesToDo);
-    void (ConvolutionState::*mMix)(const al::span<FloatBufferLine>,const size_t)
+    void NormalMix(const std::span<FloatBufferLine> samplesOut, const size_t samplesToDo);
+    void UpsampleMix(const std::span<FloatBufferLine> samplesOut, const size_t samplesToDo);
+    void (ConvolutionState::*mMix)(const std::span<FloatBufferLine>,const size_t)
     {&ConvolutionState::NormalMix};
 
     void deviceUpdate(const DeviceBase *device, const BufferStorage *buffer) override;
     void update(const ContextBase *context, const EffectSlot *slot, const EffectProps *props,
         const EffectTarget target) override;
-    void process(const size_t samplesToDo, const al::span<const FloatBufferLine> samplesIn,
-        const al::span<FloatBufferLine> samplesOut) override;
+    void process(const size_t samplesToDo, const std::span<const FloatBufferLine> samplesIn,
+        const std::span<FloatBufferLine> samplesOut) override;
 };
 
-void ConvolutionState::NormalMix(const al::span<FloatBufferLine> samplesOut,
+void ConvolutionState::NormalMix(const std::span<FloatBufferLine> samplesOut,
     const size_t samplesToDo)
 {
     for(auto &chan : mChans)
-        MixSamples(al::span{chan.mBuffer}.first(samplesToDo), samplesOut, chan.Current,
+        MixSamples(std::span{chan.mBuffer}.first(samplesToDo), samplesOut, chan.Current,
             chan.Target, samplesToDo, 0);
 }
 
-void ConvolutionState::UpsampleMix(const al::span<FloatBufferLine> samplesOut,
+void ConvolutionState::UpsampleMix(const std::span<FloatBufferLine> samplesOut,
     const size_t samplesToDo)
 {
     for(auto &chan : mChans)
     {
-        const auto src = al::span{chan.mBuffer}.first(samplesToDo);
+        const auto src = std::span{chan.mBuffer}.first(samplesToDo);
         chan.mFilter.processScale(src, chan.mHfScale, chan.mLfScale);
         MixSamples(src, samplesOut, chan.Current, chan.Target, samplesToDo, 0);
     }
@@ -351,15 +339,15 @@ void ConvolutionState::deviceUpdate(const DeviceBase *device, const BufferStorag
     auto srcsamples = std::vector<float>(srclinelength * numChannels);
     std::fill(srcsamples.begin(), srcsamples.end(), 0.0f);
     for(size_t c{0};c < numChannels && c < realChannels;++c)
-        LoadSamples(al::span{srcsamples}.subspan(srclinelength*c, buffer->mSampleLen),
-            buffer->mData.data(), c, realChannels, buffer->mType);
+        LoadSamples(std::span{srcsamples}.subspan(srclinelength*c, buffer->mSampleLen),
+            buffer->mData, c, realChannels);
 
     if(IsUHJ(mChannels))
     {
         auto decoder = std::make_unique<UhjDecoderType>();
         std::array<float*,4> samples{};
         for(size_t c{0};c < numChannels;++c)
-            samples[c] = al::to_address(srcsamples.begin() + ptrdiff_t(srclinelength*c));
+            samples[c] = std::to_address(srcsamples.begin() + ptrdiff_t(srclinelength*c));
         decoder->decode({samples.data(), numChannels}, buffer->mSampleLen, buffer->mSampleLen);
     }
 
@@ -370,38 +358,38 @@ void ConvolutionState::deviceUpdate(const DeviceBase *device, const BufferStorag
     auto filteriter = mComplexData.begin() + ptrdiff_t(mNumConvolveSegs*ConvolveUpdateSize);
     for(size_t c{0};c < numChannels;++c)
     {
-        auto bufsamples = al::span{srcsamples}.subspan(srclinelength*c, buffer->mSampleLen);
+        auto bufsamples = std::span{srcsamples}.subspan(srclinelength*c, buffer->mSampleLen);
         /* Resample to match the device. */
         if(resampler)
         {
-            auto restmp = al::span{ressamples}.subspan(resampledCount, buffer->mSampleLen);
-            std::copy(bufsamples.cbegin(), bufsamples.cend(), restmp.begin());
-            resampler.process(restmp, al::span{ressamples}.first(resampledCount));
+            auto restmp = std::span{ressamples}.subspan(resampledCount, buffer->mSampleLen);
+            std::copy(bufsamples.begin(), bufsamples.end(), restmp.begin());
+            resampler.process(restmp, std::span{ressamples}.first(resampledCount));
         }
         else
-            std::copy(bufsamples.cbegin(), bufsamples.cend(), ressamples.begin());
+            std::copy(bufsamples.begin(), bufsamples.end(), ressamples.begin());
 
         /* Store the first segment's samples in reverse in the time-domain, to
          * apply as a FIR filter.
          */
         const size_t first_size{std::min(size_t{resampledCount}, ConvolveUpdateSamples)};
-        auto sampleseg = al::span{ressamples.cbegin(), first_size};
-        std::transform(sampleseg.cbegin(), sampleseg.cend(), mFilter[c].rbegin(),
+        auto sampleseg = std::span{ressamples.cbegin(), first_size};
+        std::transform(sampleseg.begin(), sampleseg.end(), mFilter[c].rbegin(),
             [](const double d) noexcept -> float { return static_cast<float>(d); });
 
         size_t done{first_size};
         for(size_t s{0};s < mNumConvolveSegs;++s)
         {
             const size_t todo{std::min(resampledCount-done, ConvolveUpdateSamples)};
-            sampleseg = al::span{ressamples}.subspan(done, todo);
+            sampleseg = std::span{ressamples}.subspan(done, todo);
 
             /* Apply a double-precision forward FFT for more precise frequency
              * measurements.
              */
-            auto iter = std::copy(sampleseg.cbegin(), sampleseg.cend(), fftbuffer.begin());
+            auto iter = std::copy(sampleseg.begin(), sampleseg.end(), fftbuffer.begin());
             done += todo;
             std::fill(iter, fftbuffer.end(), std::complex<double>{});
-            forward_fft(al::span{fftbuffer});
+            forward_fft(std::span{fftbuffer});
 
             /* Convert to, and pack in, a float buffer for PFFFT. Note that the
              * first bin stores the real component of the half-frequency bin in
@@ -418,7 +406,7 @@ void ConvolutionState::deviceUpdate(const DeviceBase *device, const BufferStorag
             /* Reorder backward to make it suitable for pffft_zconvolve and the
              * subsequent pffft_transform(..., PFFFT_BACKWARD).
              */
-            mFft.zreorder(ffttmp.data(), al::to_address(filteriter), PFFFT_BACKWARD);
+            mFft.zreorder(ffttmp.begin(), filteriter, PFFFT_BACKWARD);
             filteriter += ConvolveUpdateSize;
         }
     }
@@ -477,7 +465,7 @@ void ConvolutionState::update(const ContextBase *context, const EffectSlot *slot
         ChanPosMap{SideRight,   std::array{  1.0f, 0.0f,  0.0f}},
     };
 
-    if(mNumConvolveSegs < 1) UNLIKELY
+    if(mNumConvolveSegs < 1) [[unlikely]]
         return;
 
     auto &props = std::get<ConvolutionProps>(*props_);
@@ -531,8 +519,8 @@ void ConvolutionState::update(const ContextBase *context, const EffectSlot *slot
 
         const auto scales = GetAmbiScales(mAmbiScaling);
         const auto index_map = Is2DAmbisonic(mChannels) ?
-            al::span{GetAmbi2DLayout(mAmbiLayout)}.subspan(0) :
-            al::span{GetAmbiLayout(mAmbiLayout)}.subspan(0);
+            std::span{GetAmbi2DLayout(mAmbiLayout)}.subspan(0) :
+            std::span{GetAmbiLayout(mAmbiLayout)}.subspan(0);
 
         std::array<float,MaxAmbiChannels> coeffs{};
         for(size_t c{0u};c < mChans.size();++c)
@@ -549,11 +537,10 @@ void ConvolutionState::update(const ContextBase *context, const EffectSlot *slot
     else
     {
         DeviceBase *device{context->mDevice};
-        al::span<const ChanPosMap> chanmap{};
+        std::span<const ChanPosMap> chanmap{};
         switch(mChannels)
         {
         case FmtMono: chanmap = MonoMap; break;
-        case FmtMonoDup: chanmap = MonoMap; break;
         case FmtSuperStereo:
         case FmtStereo: chanmap = StereoMap; break;
         case FmtRear: chanmap = RearMap; break;
@@ -626,9 +613,9 @@ void ConvolutionState::update(const ContextBase *context, const EffectSlot *slot
 }
 
 void ConvolutionState::process(const size_t samplesToDo,
-    const al::span<const FloatBufferLine> samplesIn, const al::span<FloatBufferLine> samplesOut)
+    const std::span<const FloatBufferLine> samplesIn, const std::span<FloatBufferLine> samplesOut)
 {
-    if(mNumConvolveSegs < 1) UNLIKELY
+    if(mNumConvolveSegs < 1) [[unlikely]]
         return;
 
     size_t curseg{mCurrentSegment};
@@ -645,11 +632,11 @@ void ConvolutionState::process(const size_t samplesToDo,
          */
         for(size_t c{0};c < mChans.size();++c)
         {
-            auto outspan = al::span{mChans[c].mBuffer}.subspan(base, todo);
-            apply_fir(outspan, al::span{mInput}.subspan(1+mFifoPos), mFilter[c]);
+            auto outspan = std::span{mChans[c].mBuffer}.subspan(base, todo);
+            apply_fir(outspan, std::span{mInput}.subspan(1+mFifoPos), mFilter[c]);
 
-            auto fifospan = al::span{mOutput[c]}.subspan(mFifoPos, todo);
-            std::transform(fifospan.cbegin(), fifospan.cend(), outspan.cbegin(), outspan.begin(),
+            auto fifospan = std::span{mOutput[c]}.subspan(mFifoPos, todo);
+            std::transform(fifospan.begin(), fifospan.end(), outspan.begin(), outspan.begin(),
                 std::plus{});
         }
 
@@ -667,8 +654,8 @@ void ConvolutionState::process(const size_t samplesToDo,
         /* Calculate the frequency-domain response and add the relevant
          * frequency bins to the FFT history.
          */
-        mFft.transform(mInput.data(), &mComplexData[curseg*ConvolveUpdateSize],
-            mFftWorkBuffer.data(), PFFFT_FORWARD);
+        mFft.transform(mInput.begin(), &mComplexData[curseg*ConvolveUpdateSize],
+            mFftWorkBuffer.begin(), PFFFT_FORWARD);
 
         auto filter = mComplexData.cbegin() + ptrdiff_t(mNumConvolveSegs*ConvolveUpdateSize);
         for(size_t c{0};c < mChans.size();++c)
@@ -680,16 +667,14 @@ void ConvolutionState::process(const size_t samplesToDo,
             auto input = mComplexData.cbegin() + ptrdiff_t(curseg*ConvolveUpdateSize);
             for(size_t s{curseg};s < mNumConvolveSegs;++s)
             {
-                mFft.zconvolve_accumulate(al::to_address(input), al::to_address(filter),
-                    mFftBuffer.data());
+                mFft.zconvolve_accumulate(input, filter, mFftBuffer.begin());
                 input += ConvolveUpdateSize;
                 filter += ConvolveUpdateSize;
             }
             input = mComplexData.cbegin();
             for(size_t s{0};s < curseg;++s)
             {
-                mFft.zconvolve_accumulate(al::to_address(input), al::to_address(filter),
-                    mFftBuffer.data());
+                mFft.zconvolve_accumulate(input, filter, mFftBuffer.begin());
                 input += ConvolveUpdateSize;
                 filter += ConvolveUpdateSize;
             }
@@ -699,7 +684,7 @@ void ConvolutionState::process(const size_t samplesToDo,
              * second-half samples (and this output's second half is
              * subsequently saved for next time).
              */
-            mFft.transform(mFftBuffer.data(), mFftBuffer.data(), mFftWorkBuffer.data(),
+            mFft.transform(mFftBuffer.begin(), mFftBuffer.begin(), mFftWorkBuffer.begin(),
                 PFFFT_BACKWARD);
 
             /* The filter was attenuated, so the response is already scaled. */

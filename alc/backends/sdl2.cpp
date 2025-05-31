@@ -30,11 +30,12 @@
 
 #include "alnumeric.h"
 #include "core/device.h"
+#include "pragmadefs.h"
 
-_Pragma("GCC diagnostic push")
-_Pragma("GCC diagnostic ignored \"-Wold-style-cast\"")
+DIAGNOSTIC_PUSH
+std_pragma("GCC diagnostic ignored \"-Wold-style-cast\"")
 #include "SDL.h"
-_Pragma("GCC diagnostic pop")
+DIAGNOSTIC_POP
 
 
 namespace {
@@ -85,7 +86,7 @@ void Sdl2Backend::open(std::string_view name)
     case DevFmtByte: want.format = AUDIO_S8; break;
     case DevFmtUShort: want.format = AUDIO_U16SYS; break;
     case DevFmtShort: want.format = AUDIO_S16SYS; break;
-    case DevFmtUInt: /* fall-through */
+    case DevFmtUInt: [[fallthrough]];
     case DevFmtInt: want.format = AUDIO_S32SYS; break;
     case DevFmtFloat: want.format = AUDIO_F32; break;
     }

@@ -5,20 +5,20 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
-#include <iterator>
+#include <string_view>
 #include <type_traits>
 #ifdef HAVE_INTRIN_H
 #include <intrin.h>
 #endif
 #if HAVE_SSE_INTRINSICS
-#include <xmmintrin.h>
+#include <emmintrin.h>
 #endif
 
-#include "albit.h"
-#include "altraits.h"
 #include "opthelpers.h"
 
 
@@ -31,7 +31,7 @@ constexpr auto operator "" _uz(unsigned long long n) noexcept { return static_ca
 constexpr auto operator "" _zu(unsigned long long n) noexcept { return static_cast<std::size_t>(n); }
 
 
-template<typename T, std::enable_if_t<std::is_integral_v<T>,bool> = true>
+template<std::integral T>
 constexpr auto as_unsigned(T value) noexcept
 {
     using UT = std::make_unsigned_t<T>;
@@ -39,19 +39,17 @@ constexpr auto as_unsigned(T value) noexcept
 }
 
 
-constexpr auto GetCounterSuffix(size_t count) noexcept -> const char*
+constexpr auto GetCounterSuffix(size_t count) noexcept -> std::string_view
 {
-    auto &suffix = (((count%100)/10) == 1) ? "th" :
-        ((count%10) == 1) ? "st" :
-        ((count%10) == 2) ? "nd" :
-        ((count%10) == 3) ? "rd" : "th";
-    return std::data(suffix);
+    using namespace std::string_view_literals;
+    return (((count%100)/10) == 1) ? "th"sv :
+        ((count%10) == 1) ? "st"sv :
+        ((count%10) == 2) ? "nd"sv :
+        ((count%10) == 3) ? "rd"sv : "th"sv;
 }
 
 
 constexpr auto lerpf(float val1, float val2, float mu) noexcept -> float
-{ return val1 + (val2-val1)*mu; }
-constexpr auto lerpd(double val1, double val2, double mu) noexcept -> double
 { return val1 + (val2-val1)*mu; }
 
 
@@ -75,14 +73,14 @@ inline uint32_t NextPowerOf2(uint32_t value) noexcept
  * multiple.
  */
 template<typename T>
-constexpr T RoundDown(T value, al::type_identity_t<T> r) noexcept
+constexpr T RoundDown(T value, std::type_identity_t<T> r) noexcept
 { return value - (value%r); }
 
 /**
  * If the value is not already a multiple of r, round up to the next multiple.
  */
 template<typename T>
-constexpr T RoundUp(T value, al::type_identity_t<T> r) noexcept
+constexpr T RoundUp(T value, std::type_identity_t<T> r) noexcept
 { return RoundDown(value + r-1, r); }
 
 
@@ -128,17 +126,17 @@ inline int float2int(float f) noexcept
 #elif (defined(_MSC_VER) && defined(_M_IX86_FP) && _M_IX86_FP == 0) \
     || ((defined(__GNUC__) || defined(__clang__)) && (defined(__i386__) || defined(__x86_64__)) \
         && !defined(__SSE_MATH__))
-    const int conv_i{al::bit_cast<int>(f)};
+    const auto conv_i = std::bit_cast<int>(f);
 
     const int sign{(conv_i>>31) | 1};
     const int shift{((conv_i>>23)&0xff) - (127+23)};
 
     /* Over/underflow */
-    if(shift >= 31 || shift < -23) UNLIKELY
+    if(shift >= 31 || shift < -23) [[unlikely]]
         return 0;
 
     const int mant{(conv_i&0x7fffff) | 0x800000};
-    if(shift < 0) LIKELY
+    if(shift < 0) [[likely]]
         return (mant >> -shift) * sign;
     return (mant << shift) * sign;
 
@@ -159,17 +157,17 @@ inline int double2int(double d) noexcept
 #elif (defined(_MSC_VER) && defined(_M_IX86_FP) && _M_IX86_FP < 2) \
     || ((defined(__GNUC__) || defined(__clang__)) && (defined(__i386__) || defined(__x86_64__)) \
         && !defined(__SSE2_MATH__))
-    const int64_t conv_i64{al::bit_cast<int64_t>(d)};
+    const auto conv_i64 = std::bit_cast<int64_t>(d);
 
     const int sign{static_cast<int>(conv_i64 >> 63) | 1};
     const int shift{(static_cast<int>(conv_i64 >> 52) & 0x7ff) - (1023 + 52)};
 
     /* Over/underflow */
-    if(shift >= 63 || shift < -52) UNLIKELY
+    if(shift >= 63 || shift < -52) [[unlikely]]
         return 0;
 
     const int64_t mant{(conv_i64 & 0xfffffffffffff_i64) | 0x10000000000000_i64};
-    if(shift < 0) LIKELY
+    if(shift < 0) [[likely]]
         return static_cast<int>(mant >> -shift) * sign;
     return static_cast<int>(mant << shift) * sign;
 
@@ -208,12 +206,12 @@ inline float fast_roundf(float f) noexcept
          8388608.0f /*  0x1.0p+23 */,
         -8388608.0f /* -0x1.0p+23 */
     };
-    const unsigned int conv_i{al::bit_cast<unsigned int>(f)};
+    const auto conv_i = std::bit_cast<unsigned int>(f);
 
     const unsigned int sign{(conv_i>>31)&0x01};
     const unsigned int expo{(conv_i>>23)&0xff};
 
-    if(expo >= 150/*+23*/) UNLIKELY
+    if(expo >= 150/*+23*/) [[unlikely]]
     {
         /* An exponent (base-2) of 23 or higher is incapable of sub-integral
          * precision, so it's already an integral value. We don't need to worry

@@ -31,6 +31,7 @@
 #include <exception>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -38,7 +39,6 @@
 #include <vector>
 
 #include "alc/alconfig.h"
-#include "almalloc.h"
 #include "alnumeric.h"
 #include "althrd_setname.h"
 #include "core/device.h"
@@ -53,6 +53,7 @@
 
 namespace {
 
+using namespace std::string_literals;
 using namespace std::string_view_literals;
 
 [[nodiscard]] constexpr auto GetDefaultName() noexcept { return "ALSA Default"sv; }
@@ -243,11 +244,6 @@ SwParamsPtr CreateSwParams()
 struct DevMap {
     std::string name;
     std::string device_name;
-
-    template<typename T, typename U>
-    DevMap(T&& name_, U&& devname)
-        : name{std::forward<T>(name_)}, device_name{std::forward<U>(devname)}
-    { }
 };
 
 std::vector<DevMap> PlaybackDevices;
@@ -310,7 +306,7 @@ std::vector<DevMap> probe_devices(snd_pcm_stream_t stream)
 
     auto defname = ConfigValueStr({}, "alsa"sv,
         (stream == SND_PCM_STREAM_PLAYBACK) ? "device"sv : "capture"sv);
-    devlist.emplace_back(GetDefaultName(), defname ? std::string_view{*defname} : "default"sv);
+    devlist.emplace_back(std::string{GetDefaultName()}, defname ? *defname : "default"s);
 
     if(auto customdevs = ConfigValueStr({}, "alsa"sv,
         (stream == SND_PCM_STREAM_PLAYBACK) ? "custom-devices"sv : "custom-captures"sv))
@@ -327,9 +323,8 @@ std::vector<DevMap> probe_devices(snd_pcm_stream_t stream)
             }
             else
             {
-                const std::string_view strview{*customdevs};
-                const auto &entry = devlist.emplace_back(strview.substr(curpos, seppos-curpos),
-                    strview.substr(seppos+1, nextpos-seppos-1));
+                const auto &entry = devlist.emplace_back(customdevs->substr(curpos, seppos-curpos),
+                    customdevs->substr(seppos+1, nextpos-seppos-1));
                 TRACE("Got device \"{}\", \"{}\"", entry.name, entry.device_name);
             }
 
@@ -556,7 +551,7 @@ int AlsaPlayback::mixerProc()
             mDevice->renderSamples(WritePtr, static_cast<uint>(frames), mFrameStep);
 
             snd_pcm_sframes_t commitres{snd_pcm_mmap_commit(mPcmHandle, offset, frames)};
-            if(commitres < 0 || static_cast<snd_pcm_uframes_t>(commitres) != frames)
+            if(std::cmp_not_equal(commitres, frames))
             {
                 ERR("mmap commit error: {}",
                     snd_strerror(commitres >= 0 ? -EPIPE : static_cast<int>(commitres)));
@@ -620,10 +615,10 @@ int AlsaPlayback::mixerNoMMapProc()
         auto WritePtr = mBuffer.begin();
         avail = snd_pcm_bytes_to_frames(mPcmHandle, static_cast<ssize_t>(mBuffer.size()));
         std::lock_guard<std::mutex> dlock{mMutex};
-        mDevice->renderSamples(al::to_address(WritePtr), static_cast<uint>(avail), mFrameStep);
+        mDevice->renderSamples(std::to_address(WritePtr), static_cast<uint>(avail), mFrameStep);
         while(avail > 0)
         {
-            snd_pcm_sframes_t ret{snd_pcm_writei(mPcmHandle, al::to_address(WritePtr),
+            snd_pcm_sframes_t ret{snd_pcm_writei(mPcmHandle, std::to_address(WritePtr),
                 static_cast<snd_pcm_uframes_t>(avail))};
             switch(ret)
             {
@@ -913,7 +908,7 @@ struct AlsaCapture final : public BackendBase {
     std::vector<std::byte> mBuffer;
 
     bool mDoCapture{false};
-    RingBufferPtr mRing{nullptr};
+    RingBuffer2Ptr<std::byte> mRing;
 
     snd_pcm_sframes_t mLastAvail{0};
 };
@@ -1020,7 +1015,8 @@ void AlsaCapture::open(std::string_view name)
     hp = nullptr;
 
     if(needring)
-        mRing = RingBuffer::Create(mDevice->mBufferSize, mDevice->frameSizeFromFmt(), false);
+        mRing = RingBuffer2<std::byte>::Create(mDevice->mBufferSize, mDevice->frameSizeFromFmt(),
+            false);
 
     mDeviceName = name;
 }
@@ -1045,7 +1041,7 @@ void AlsaCapture::stop()
      * snd_pcm_drain is unreliable and snd_pcm_drop drops it. Capture what's
      * available now so it'll be available later after the drop.
      */
-    uint avail{availableSamples()};
+    const auto avail = availableSamples();
     if(!mRing && avail > 0)
     {
         /* The ring buffer implicitly captures when checking availability.
@@ -1056,31 +1052,32 @@ void AlsaCapture::stop()
         captureSamples(temp.data(), avail);
         mBuffer = std::move(temp);
     }
-    if(int err{snd_pcm_drop(mPcmHandle)}; err < 0)
+    if(const auto err = snd_pcm_drop(mPcmHandle); err < 0)
         ERR("snd_pcm_drop failed: {}", snd_strerror(err));
     mDoCapture = false;
 }
 
 void AlsaCapture::captureSamples(std::byte *buffer, uint samples)
 {
+    const auto outspan = std::span{buffer,
+        static_cast<size_t>(snd_pcm_frames_to_bytes(mPcmHandle, samples))};
+
     if(mRing)
     {
-        std::ignore = mRing->read(buffer, samples);
+        std::ignore = mRing->read(outspan);
         return;
     }
 
-    const auto outspan = al::span{buffer,
-        static_cast<size_t>(snd_pcm_frames_to_bytes(mPcmHandle, samples))};
     auto outiter = outspan.begin();
     mLastAvail -= samples;
     while(mDevice->Connected.load(std::memory_order_acquire) && samples > 0)
     {
-        snd_pcm_sframes_t amt{0};
+        auto amt = snd_pcm_sframes_t{0};
 
         if(!mBuffer.empty())
         {
             /* First get any data stored from the last stop */
-            amt = snd_pcm_bytes_to_frames(mPcmHandle, static_cast<ssize_t>(mBuffer.size()));
+            amt = snd_pcm_bytes_to_frames(mPcmHandle, std::ssize(mBuffer));
             if(static_cast<snd_pcm_uframes_t>(amt) > samples) amt = samples;
 
             amt = snd_pcm_frames_to_bytes(mPcmHandle, amt);
@@ -1090,7 +1087,7 @@ void AlsaCapture::captureSamples(std::byte *buffer, uint samples)
             amt = snd_pcm_bytes_to_frames(mPcmHandle, amt);
         }
         else if(mDoCapture)
-            amt = snd_pcm_readi(mPcmHandle, al::to_address(outiter), samples);
+            amt = snd_pcm_readi(mPcmHandle, std::to_address(outiter), samples);
         if(amt < 0)
         {
             ERR("read error: {}", snd_strerror(static_cast<int>(amt)));
@@ -1128,7 +1125,7 @@ void AlsaCapture::captureSamples(std::byte *buffer, uint samples)
 
 uint AlsaCapture::availableSamples()
 {
-    snd_pcm_sframes_t avail{0};
+    auto avail = snd_pcm_sframes_t{0};
     if(mDevice->Connected.load(std::memory_order_acquire) && mDoCapture)
         avail = snd_pcm_avail_update(mPcmHandle);
     if(avail < 0)
@@ -1145,7 +1142,7 @@ uint AlsaCapture::availableSamples()
         }
         if(avail < 0)
         {
-            const char *err{snd_strerror(static_cast<int>(avail))};
+            auto *err = snd_strerror(static_cast<int>(avail));
             ERR("restore error: {}", err);
             mDevice->handleDisconnect("Capture recovery failure: {}", err);
         }
@@ -1162,10 +1159,11 @@ uint AlsaCapture::availableSamples()
     while(avail > 0)
     {
         auto vec = mRing->getWriteVector();
-        if(vec[0].len == 0) break;
+        if(vec[0].empty()) break;
 
-        snd_pcm_sframes_t amt{std::min(static_cast<snd_pcm_sframes_t>(vec[0].len), avail)};
-        amt = snd_pcm_readi(mPcmHandle, vec[0].buf, static_cast<snd_pcm_uframes_t>(amt));
+        auto amt = snd_pcm_bytes_to_frames(mPcmHandle, std::ssize(vec[0]));
+        amt = std::min(amt, avail);
+        amt = snd_pcm_readi(mPcmHandle, vec[0].data(), static_cast<snd_pcm_uframes_t>(amt));
         if(amt < 0)
         {
             ERR("read error: {}", snd_strerror(static_cast<int>(amt)));
@@ -1235,7 +1233,9 @@ bool AlsaBackendFactory::init()
     p##f = reinterpret_cast<decltype(p##f)>(GetSymbol(alsa_handle, #f));      \
     if(p##f == nullptr) missing_funcs += "\n" #f;                             \
 } while(0)
+        /* NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast) */
         ALSA_FUNCS(LOAD_FUNC);
+        /* NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast) */
 #undef LOAD_FUNC
 
         if(!missing_funcs.empty())

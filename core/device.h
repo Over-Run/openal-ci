@@ -8,10 +8,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <string>
 
 #include "almalloc.h"
-#include "alspan.h"
 #include "ambidefs.h"
 #include "atomic.h"
 #include "bufferline.h"
@@ -72,7 +72,7 @@ struct InputRemixMap {
     struct TargetMix { Channel channel; float mix; };
 
     Channel channel;
-    al::span<const TargetMix> targets;
+    std::span<const TargetMix> targets;
 };
 
 
@@ -81,7 +81,7 @@ struct DistanceComp {
     static constexpr uint MaxDelay{1024};
 
     struct ChanData {
-        al::span<float> Buffer; /* Valid size is [0...MaxDelay). */
+        std::span<float> Buffer; /* Valid size is [0...MaxDelay). */
         float Gain{1.0f};
     };
 
@@ -108,7 +108,7 @@ struct MixParams {
     /* Coefficient channel mapping for mixing to the buffer. */
     std::array<BFChannelConfig,MaxAmbiChannels> AmbiMap{};
 
-    al::span<FloatBufferLine> Buffer;
+    std::span<FloatBufferLine> Buffer;
 
     /**
      * Helper to set an identity/pass-through panning for ambisonic mixing. The
@@ -143,10 +143,10 @@ struct MixParams {
 };
 
 struct RealMixParams {
-    al::span<const InputRemixMap> RemixMap;
+    std::span<const InputRemixMap> RemixMap;
     std::array<std::uint8_t,MaxChannels> ChannelIndex{};
 
-    al::span<FloatBufferLine> Buffer;
+    std::span<FloatBufferLine> Buffer;
 };
 
 using AmbiRotateMatrix = std::array<std::array<float,MaxAmbiChannels>,MaxAmbiChannels>;
@@ -292,8 +292,11 @@ struct SIMDALIGN DeviceBase {
     std::atomic<uint> mMixCount{0u};
 
     // Contexts created on this device
-    al::atomic_unique_ptr<al::FlexArray<ContextBase*>> mContexts;
+    using ContextArray = al::FlexArray<ContextBase*>;
+    al::atomic_unique_ptr<ContextArray> mContexts;
 
+    /** Returns the number of contexts remaining on the device. */
+    [[nodiscard]] auto removeContext(ContextBase *context) -> size_t;
 
     [[nodiscard]] auto bytesFromFmt() const noexcept -> uint { return BytesFromDevFmt(FmtType); }
     [[nodiscard]] auto channelsFromFmt() const noexcept -> uint { return ChannelsFromDevFmt(FmtChans, mAmbiOrder); }
@@ -350,9 +353,9 @@ struct SIMDALIGN DeviceBase {
     void ProcessBs2b(const std::size_t SamplesToDo);
 
     void postProcess(const std::size_t SamplesToDo)
-    { if(PostProcess) LIKELY (this->*PostProcess)(SamplesToDo); }
+    { if(PostProcess) [[likely]] (this->*PostProcess)(SamplesToDo); }
 
-    void renderSamples(const al::span<void*> outBuffers, const uint numSamples);
+    void renderSamples(const std::span<void*> outBuffers, const uint numSamples);
     void renderSamples(void *outBuffer, const uint numSamples, const std::size_t frameStep);
 
     /* Caller must lock the device state, and the mixer must not be running. */

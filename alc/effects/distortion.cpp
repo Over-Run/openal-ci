@@ -76,7 +76,7 @@ void DistortionState::update(const ContextBase *context, const EffectSlot *slot,
     const EffectProps *props_, const EffectTarget target)
 {
     auto &props = std::get<DistortionProps>(*props_);
-    const auto *device = context->mDevice;
+    auto const device = al::get_not_null(context->mDevice);
 
     /* Store waveshaper edge settings. */
     const auto edge = std::min(std::sin(std::numbers::pi_v<float>*0.5f * props.Edge), 0.99f);
@@ -160,7 +160,7 @@ void DistortionState::process(const size_t samplesToDo,
             std::ranges::transform(dst, dst.begin(), [gain,&src](float sample) noexcept -> float
             {
                 sample += *src * gain;
-                src += 4;
+                std::advance(src, 4);
                 return sample;
             });
         });
@@ -177,8 +177,8 @@ struct DistortionStateFactory final : public EffectStateFactory {
 
 } // namespace
 
-EffectStateFactory *DistortionStateFactory_getFactory()
+auto DistortionStateFactory_getFactory() -> gsl::strict_not_null<EffectStateFactory*>
 {
     static DistortionStateFactory DistortionFactory{};
-    return &DistortionFactory;
+    return gsl::make_not_null(&DistortionFactory);
 }

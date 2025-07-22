@@ -29,6 +29,7 @@
 #include <memory.h>
 #include <memory>
 #include <mutex>
+#include <ranges>
 #include <span>
 #include <thread>
 #include <vector>
@@ -41,6 +42,7 @@
 #include "core/logging.h"
 #include "dynload.h"
 #include "fmt/format.h"
+#include "gsl/gsl"
 #include "ringbuffer.h"
 
 #include <jack/jack.h>
@@ -109,7 +111,7 @@ decltype(jack_error_callback) * pjack_error_callback;
 
 jack_options_t ClientOptions = JackNullOption;
 
-bool jack_load()
+auto jack_load() -> bool
 {
 #if HAVE_DYNLOAD
     if(!jack_handle)
@@ -121,32 +123,42 @@ bool jack_load()
 #else
 #define JACKLIB "libjack.so.0"
 #endif
-        jack_handle = LoadLib(JACKLIB);
-        if(!jack_handle)
+        if(auto libresult = LoadLib(JACKLIB))
+            jack_handle = libresult.value();
+        else
         {
-            WARN("Failed to load {}", JACKLIB);
+            WARN("Failed to load {}: {}", JACKLIB, libresult.error());
             return false;
         }
 
-        auto missing_funcs = std::string{};
-#define LOAD_FUNC(f) do {                                                     \
-    p##f = reinterpret_cast<decltype(p##f)>(GetSymbol(jack_handle, #f));      \
-    if(p##f == nullptr) missing_funcs += "\n" #f;                             \
-} while(0)
-        JACK_FUNCS(LOAD_FUNC); /* NOLINT(cppcoreguidelines-pro-type-reinterpret-cast) */
-#undef LOAD_FUNC
-        /* Optional symbols. These don't exist in all versions of JACK. */
-#define LOAD_SYM(f) p##f = reinterpret_cast<decltype(p##f)>(GetSymbol(jack_handle, #f))
-        LOAD_SYM(jack_error_callback); /* NOLINT(cppcoreguidelines-pro-type-reinterpret-cast) */
-#undef LOAD_SYM
-
-        if(!missing_funcs.empty())
+        static constexpr auto load_func = [](auto *&func, const char *name) -> bool
         {
-            WARN("Missing expected functions:{}", missing_funcs);
+            using func_t = std::remove_reference_t<decltype(func)>;
+            auto funcresult = GetSymbol(jack_handle, name);
+            if(!funcresult)
+            {
+                WARN("Failed to load function {}: {}", name, funcresult.error());
+                return false;
+            }
+            /* NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) */
+            func = reinterpret_cast<func_t>(funcresult.value());
+            return true;
+        };
+        auto ok = true;
+#define LOAD_FUNC(f) ok &= load_func(p##f, #f)
+        JACK_FUNCS(LOAD_FUNC)
+#undef LOAD_FUNC
+        if(!ok)
+        {
             CloseLib(jack_handle);
             jack_handle = nullptr;
             return false;
         }
+
+        /* Optional symbols. These don't exist in all versions of JACK. */
+#define LOAD_SYM(f) std::ignore = load_func(p##f, #f)
+        LOAD_SYM(jack_error_callback);
+#undef LOAD_SYM
     }
 #endif
 
@@ -154,10 +166,9 @@ bool jack_load()
 }
 
 
-struct JackDeleter {
-    void operator()(void *ptr) { jack_free(ptr); }
-};
-using JackPortsPtr = std::unique_ptr<const char*[],JackDeleter>; /* NOLINT(*-avoid-c-arrays) */
+/* NOLINTNEXTLINE(*-avoid-c-arrays) */
+using JackPortsPtr = std::unique_ptr<gsl::czstring[], decltype([](gsl::czstring *ptr)
+    { jack_free(static_cast<void*>(ptr)); })>;
 
 struct DeviceEntry {
     std::string mName;
@@ -174,19 +185,18 @@ void EnumerateDevices(jack_client_t *client, std::vector<DeviceEntry> &list)
 {
     std::remove_reference_t<decltype(list)>{}.swap(list);
 
-    if(JackPortsPtr ports{jack_get_ports(client, nullptr, JACK_DEFAULT_AUDIO_TYPE, JackPortIsInput)})
+    if(const auto ports = JackPortsPtr{jack_get_ports(client, nullptr, JACK_DEFAULT_AUDIO_TYPE,
+        JackPortIsInput)})
     {
-        for(size_t i{0};ports[i];++i)
+        for(auto i = 0_uz;ports[i];++i)
         {
-            const std::string_view portname{ports[i]};
-            const size_t seppos{portname.find(':')};
+            const auto portname = std::string_view{ports[i]};
+            const auto seppos = portname.find(':');
             if(seppos == 0 || seppos >= portname.size())
                 continue;
 
             const auto portdev = portname.substr(0, seppos);
-            auto check_name = [portdev](const DeviceEntry &entry) -> bool
-            { return entry.mName == portdev; };
-            if(std::find_if(list.cbegin(), list.cend(), check_name) != list.cend())
+            if(std::ranges::find(list, portdev, &DeviceEntry::mName) != list.end())
                 continue;
 
             const auto &entry = list.emplace_back(std::string{portdev},
@@ -205,10 +215,10 @@ void EnumerateDevices(jack_client_t *client, std::vector<DeviceEntry> &list)
 
     if(auto listopt = ConfigValueStr({}, "jack", "custom-devices"))
     {
-        for(size_t strpos{0};strpos < listopt->size();)
+        for(auto strpos = 0_uz;strpos < listopt->size();)
         {
-            size_t nextpos{listopt->find(';', strpos)};
-            size_t seppos{listopt->find('=', strpos)};
+            auto nextpos = listopt->find(';', strpos);
+            const auto seppos = listopt->find('=', strpos);
             if(seppos >= nextpos || seppos == strpos)
             {
                 const auto entry = std::string_view{*listopt}.substr(strpos, nextpos-strpos);
@@ -223,9 +233,7 @@ void EnumerateDevices(jack_client_t *client, std::vector<DeviceEntry> &list)
                 std::min(nextpos, listopt->size())-(seppos+1));
 
             /* Check if this custom pattern already exists in the list. */
-            auto check_pattern = [pattern](const DeviceEntry &entry) -> bool
-            { return entry.mPattern == pattern; };
-            auto itemmatch = std::find_if(list.begin(), list.end(), check_pattern);
+            auto itemmatch = std::ranges::find(list, pattern, &DeviceEntry::mPattern);
             if(itemmatch != list.end())
             {
                 /* If so, replace the name with this custom one. */
@@ -251,19 +259,14 @@ void EnumerateDevices(jack_client_t *client, std::vector<DeviceEntry> &list)
          */
         for(auto curitem = list.begin()+1;curitem != list.end();++curitem)
         {
-            auto check_match = [curitem](const DeviceEntry &entry) -> bool
-            { return entry.mName == curitem->mName; };
-            if(std::find_if(list.begin(), curitem, check_match) != curitem)
+            const auto subrange = std::span{list.begin(), curitem};
+            if(std::ranges::find(subrange, curitem->mName, &DeviceEntry::mName) != subrange.end())
             {
-                std::string name{curitem->mName};
-                size_t count{1};
-                auto check_name = [&name](const DeviceEntry &entry) -> bool
-                { return entry.mName == name; };
+                auto name = std::string{};
+                auto count = 1_uz;
                 do {
-                    name = curitem->mName;
-                    name += " #";
-                    name += std::to_string(++count);
-                } while(std::find_if(list.begin(), curitem, check_name) != curitem);
+                    name = fmt::format("{} #{}", curitem->mName, ++count);
+                } while(std::ranges::find(subrange, name, &DeviceEntry::mName) != subrange.end());
                 curitem->mName = std::move(name);
             }
         }
@@ -300,7 +303,7 @@ struct JackPlayback final : public BackendBase {
 
     std::atomic<bool> mPlaying{false};
     bool mRTMixing{false};
-    RingBuffer2Ptr<float> mRing;
+    RingBufferPtr<float> mRing;
     std::atomic<bool> mSignal;
 
     std::atomic<bool> mKillNow{true};
@@ -328,11 +331,11 @@ int JackPlayback::processRt(jack_nframes_t numframes) noexcept
 
     const auto dst = std::span{outptrs}.first(mPort.size());
     if(mPlaying.load(std::memory_order_acquire)) [[likely]]
-        mDevice->renderSamples(dst, static_cast<uint>(numframes));
+        mDevice->renderSamples(dst, gsl::narrow_cast<uint>(numframes));
     else
     {
         std::ranges::for_each(dst, [numframes](void *outbuf) -> void
-        { std::fill_n(static_cast<float*>(outbuf), numframes, 0.0f); });
+        { std::ranges::fill(std::views::counted(static_cast<float*>(outbuf), numframes), 0.0f); });
     }
 
     return 0;
@@ -597,7 +600,7 @@ void JackPlayback::start()
         bufsize = std::max(NextPowerOf2(bufsize), mDevice->mUpdateSize) / mDevice->mUpdateSize;
         mDevice->mBufferSize = (bufsize+1) * mDevice->mUpdateSize;
 
-        mRing = RingBuffer2<float>::Create(bufsize,
+        mRing = RingBuffer<float>::Create(bufsize,
             size_t{mDevice->mUpdateSize} * mDevice->channelsFromFmt(), true);
 
         try {
@@ -658,15 +661,15 @@ bool JackBackendFactory::init()
         return false;
 
     if(!GetConfigValueBool({}, "jack", "spawn-server", false))
-        ClientOptions = static_cast<jack_options_t>(ClientOptions | JackNoStartServer);
+        ClientOptions = gsl::narrow_cast<jack_options_t>(ClientOptions | JackNoStartServer);
 
-    const PathNamePair &binname = GetProcBinary();
-    const char *client_name{binname.fname.empty() ? "alsoft" : binname.fname.c_str()};
+    auto&& binname = GetProcBinary();
+    auto *client_name = binname.fname.empty() ? "alsoft" : binname.fname.c_str();
 
     void (*old_error_cb)(const char*){&jack_error_callback ? jack_error_callback : nullptr};
     jack_set_error_function(jack_msg_handler);
-    jack_status_t status{};
-    jack_client_t *client{jack_client_open(client_name, ClientOptions, &status, nullptr)};
+    auto status = jack_status_t{};
+    auto *client = jack_client_open(client_name, ClientOptions, &status, nullptr);
     jack_set_error_function(old_error_cb);
     if(!client)
     {
@@ -688,7 +691,7 @@ auto JackBackendFactory::enumerate(BackendType type) -> std::vector<std::string>
     auto outnames = std::vector<std::string>{};
 
     auto&& binname = GetProcBinary();
-    auto *client_name{binname.fname.empty() ? "alsoft" : binname.fname.c_str()};
+    auto *client_name = binname.fname.empty() ? "alsoft" : binname.fname.c_str();
     auto status = jack_status_t{};
     switch(type)
     {

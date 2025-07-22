@@ -26,7 +26,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cassert>
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
@@ -41,6 +40,7 @@
 #include "alnumeric.h"
 #include "fmt/core.h"
 #include "fmt/ranges.h"
+#include "gsl/gsl"
 #include "phase_shifter.h"
 #include "vector.h"
 
@@ -53,22 +53,19 @@ namespace {
 
 using namespace std::string_view_literals;
 
-struct SndFileDeleter {
-    void operator()(SNDFILE *sndfile) { sf_close(sndfile); }
-};
-using SndFilePtr = std::unique_ptr<SNDFILE,SndFileDeleter>;
+using SndFilePtr = std::unique_ptr<SNDFILE, decltype([](SNDFILE *sndfile) { sf_close(sndfile); })>;
 
 
 using uint = unsigned int;
 
-constexpr uint BufferLineSize{1024};
+constexpr auto BufferLineSize = 1024u;
 
 using FloatBufferLine = std::array<float,BufferLineSize>;
 using FloatBufferSpan = std::span<float,BufferLineSize>;
 
 
 struct UhjEncoder {
-    constexpr static size_t sFilterDelay{1024};
+    constexpr static auto sFilterDelay = 1024_uz;
 
     /* Delays and processing storage for the unfiltered signal. */
     alignas(16) std::array<float,BufferLineSize+sFilterDelay> mW{};
@@ -245,9 +242,9 @@ constexpr auto GenCoeffs(double x /*+front*/, double y /*+left*/, double z /*+up
 {
     /* Coefficients are +3dB of FuMa. */
     return std::array{1.0f,
-        static_cast<float>(std::numbers::sqrt2 * x),
-        static_cast<float>(std::numbers::sqrt2 * y),
-        static_cast<float>(std::numbers::sqrt2 * z)};
+        gsl::narrow_cast<float>(std::numbers::sqrt2 * x),
+        gsl::narrow_cast<float>(std::numbers::sqrt2 * y),
+        gsl::narrow_cast<float>(std::numbers::sqrt2 * z)};
 }
 
 
@@ -274,7 +271,7 @@ auto main(std::span<std::string_view> args) -> int
     }
     args = args.subspan(1);
 
-    uint uhjchans = 2u;
+    auto uhjchans = 2u;
     auto num_files = 0_uz;
     auto num_encoded = 0_uz;
     std::ranges::for_each(args, [&uhjchans,&num_files,&num_encoded](std::string_view arg) -> void
@@ -318,18 +315,19 @@ auto main(std::span<std::string_view> args) -> int
          * from the file/format, but falling back to assuming WFX order.
          */
         auto spkrs = std::span<const SpeakerPos>{};
-        auto chanmap = std::vector<int>(static_cast<uint>(ininfo.channels), SF_CHANNEL_MAP_INVALID);
+        auto chanmap = std::vector<int>(gsl::narrow_cast<uint>(ininfo.channels),
+            SF_CHANNEL_MAP_INVALID);
         if(sf_command(infile.get(), SFC_GET_CHANNEL_MAP_INFO, chanmap.data(),
-            ininfo.channels*int{sizeof(int)}) == SF_TRUE)
+            gsl::narrow_cast<int>(std::span{chanmap}.size_bytes())) == SF_TRUE)
         {
             static constexpr auto monomap = std::array{SF_CHANNEL_MAP_CENTER};
-            static constexpr auto stereomap = std::array{SF_CHANNEL_MAP_LEFT, SF_CHANNEL_MAP_RIGHT};
+            static constexpr auto stereomap = std::array{SF_CHANNEL_MAP_LEFT,SF_CHANNEL_MAP_RIGHT};
             static constexpr auto quadmap = std::array{SF_CHANNEL_MAP_LEFT, SF_CHANNEL_MAP_RIGHT,
                 SF_CHANNEL_MAP_REAR_LEFT, SF_CHANNEL_MAP_REAR_RIGHT};
             static constexpr auto x51map = std::array{SF_CHANNEL_MAP_LEFT, SF_CHANNEL_MAP_RIGHT,
                 SF_CHANNEL_MAP_CENTER, SF_CHANNEL_MAP_LFE,
                 SF_CHANNEL_MAP_SIDE_LEFT, SF_CHANNEL_MAP_SIDE_RIGHT};
-            static constexpr auto x51rearmap = std::array{SF_CHANNEL_MAP_LEFT, SF_CHANNEL_MAP_RIGHT,
+            static constexpr auto x51rearmap = std::array{SF_CHANNEL_MAP_LEFT,SF_CHANNEL_MAP_RIGHT,
                 SF_CHANNEL_MAP_CENTER, SF_CHANNEL_MAP_LFE,
                 SF_CHANNEL_MAP_REAR_LEFT, SF_CHANNEL_MAP_REAR_RIGHT};
             static constexpr auto x71map = std::array{SF_CHANNEL_MAP_LEFT, SF_CHANNEL_MAP_RIGHT,
@@ -349,7 +347,7 @@ auto main(std::span<std::string_view> args) -> int
                 SF_CHANNEL_MAP_AMBISONIC_B_Z};
 
             static constexpr auto match_chanmap = [](const std::span<const int> a,
-                const std::span<const decltype(monomap)::value_type> b) -> bool
+                const std::span<const decltype(SF_CHANNEL_MAP_INVALID)> b) -> bool
             {
                 if(a.size() != b.size())
                     return false;
@@ -451,7 +449,7 @@ auto main(std::span<std::string_view> args) -> int
         auto outinfo = SF_INFO{};
         outinfo.frames = ininfo.frames;
         outinfo.samplerate = ininfo.samplerate;
-        outinfo.channels = static_cast<int>(uhjchans);
+        outinfo.channels = gsl::narrow_cast<int>(uhjchans);
         outinfo.format = SF_FORMAT_PCM_24 | SF_FORMAT_FLAC;
         auto outfile = SndFilePtr{sf_open(outname.c_str(), SFM_WRITE, &outinfo)};
         if(!outfile)
@@ -465,11 +463,11 @@ auto main(std::span<std::string_view> args) -> int
         auto ambmem = std::span{splbuf}.subspan<0,4>();
         auto encmem = std::span{splbuf}.subspan<4,4>();
         auto srcmem = std::span{splbuf[8]};
-        auto membuf = al::vector<float,16>((static_cast<uint>(ininfo.channels)+size_t{uhjchans})
-            * BufferLineSize);
+        auto membuf = al::vector<float,16>((gsl::narrow_cast<uint>(ininfo.channels)
+            +size_t{uhjchans}) * BufferLineSize);
         auto outmem = std::span{membuf}.first(size_t{BufferLineSize}*uhjchans);
         auto inmem = std::span{membuf}.last(size_t{BufferLineSize}
-            * static_cast<uint>(ininfo.channels));
+            * gsl::narrow_cast<uint>(ininfo.channels));
 
         /* A number of initial samples need to be skipped to cut the lead-in
          * from the all-pass filter delay. The same number of samples need to
@@ -477,6 +475,7 @@ auto main(std::span<std::string_view> args) -> int
          * to ensure none of the original input is lost.
          */
         auto total_wrote = 0_uz;
+        auto clipped_samples = 0_uz;
         auto LeadIn = size_t{UhjEncoder::sFilterDelay};
         auto LeadOut = sf_count_t{UhjEncoder::sFilterDelay};
         while(LeadIn > 0 || LeadOut > 0)
@@ -493,21 +492,21 @@ auto main(std::span<std::string_view> args) -> int
 
             std::ranges::fill(ambmem | std::views::join, 0.0f);
 
-            auto got = static_cast<size_t>(sgot);
+            auto got = gsl::narrow_cast<size_t>(sgot);
             if(spkrs.empty())
             {
                 /* B-Format is already in the correct order. It just needs a
                  * +3dB boost.
                  */
                 static constexpr auto scale = std::numbers::sqrt2_v<float>;
-                const auto chans = std::min<size_t>(static_cast<uint>(ininfo.channels), 4u);
-                for(auto c = 0_uz;c < chans;++c)
+                const auto chans = size_t{std::min(gsl::narrow_cast<uint>(ininfo.channels), 4u)};
+                for(const auto c : std::views::iota(0_uz, chans))
                 {
-                    for(auto i = 0_uz;i < got;++i)
-                        ambmem[c][i] = inmem[i*static_cast<uint>(ininfo.channels) + c] * scale;
+                    for(const auto i : std::views::iota(0_uz, got))
+                        ambmem[c][i] = inmem[i*gsl::narrow_cast<uint>(ininfo.channels) + c]*scale;
                 }
             }
-            else for(auto idx = 0_uz;idx < chanmap.size();++idx)
+            else for(const auto idx : std::views::iota(0_uz, chanmap.size()))
             {
                 const auto chanid = chanmap[idx];
                 /* Skip LFE. Or mix directly into W? Or W+X? */
@@ -521,8 +520,8 @@ auto main(std::span<std::string_view> args) -> int
                     continue;
                 }
 
-                for(auto i = 0_uz;i < got;++i)
-                    srcmem[i] = inmem[i*static_cast<uint>(ininfo.channels) + idx];
+                for(const auto i : std::views::iota(0_uz, got))
+                    srcmem[i] = inmem[i*gsl::narrow_cast<uint>(ininfo.channels) + idx];
 
                 static constexpr auto Deg2Rad = std::numbers::pi / 180.0;
                 const auto coeffs = GenCoeffs(
@@ -546,22 +545,27 @@ auto main(std::span<std::string_view> args) -> int
             }
 
             got -= LeadIn;
-            for(auto c = 0_uz;c < uhjchans;++c)
+            for(const auto c : std::views::iota(0_uz, uhjchans))
             {
                 static constexpr auto max_val = 8388607.0f / 8388608.0f;
-                for(auto i = 0_uz;i < got;++i)
-                    outmem[i*uhjchans + c] = std::clamp(encmem[c][LeadIn+i], -1.0f, max_val);
+                for(const auto i : std::views::iota(0_uz, got))
+                {
+                    const auto sample = std::clamp(encmem[c][LeadIn+i], -1.0f, max_val);
+                    clipped_samples += sample != encmem[c][LeadIn+i];
+                    outmem[i*uhjchans + c] = sample;
+                }
             }
             LeadIn = 0;
 
             const auto wrote = sf_writef_float(outfile.get(), outmem.data(),
-                static_cast<sf_count_t>(got));
+                gsl::narrow_cast<sf_count_t>(got));
             if(wrote < 0)
                 fmt::println(stderr, " ... failed to write samples: {}", sf_error(outfile.get()));
             else
-                total_wrote += static_cast<size_t>(wrote);
+                total_wrote += gsl::narrow_cast<size_t>(wrote);
         }
-        fmt::println(" ... wrote {} samples ({}).", total_wrote, ininfo.frames);
+        fmt::println(" ... wrote {} samples ({} total, {} clipped).", total_wrote, ininfo.frames,
+            clipped_samples);
         ++num_encoded;
     });
 
@@ -579,8 +583,7 @@ auto main(std::span<std::string_view> args) -> int
 
 auto main(int argc, char **argv) -> int
 {
-    assert(argc >= 0);
-    auto args = std::vector<std::string_view>(static_cast<unsigned int>(argc));
+    auto args = std::vector<std::string_view>(gsl::narrow<unsigned>(argc));
     std::ranges::copy(std::views::counted(argv, argc), args.begin());
     return main(std::span{args});
 }

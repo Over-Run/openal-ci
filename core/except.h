@@ -5,9 +5,12 @@
 #include <string>
 #include <type_traits>
 
+#include "opthelpers.h"
+
 
 namespace al {
 
+/* NOLINTNEXTLINE(clazy-copyable-polymorphic) Exceptions must be copyable. */
 class base_exception : public std::exception {
     std::string mMessage;
 
@@ -19,10 +22,11 @@ public:
     base_exception(base_exception&&) = default;
     ~base_exception() override;
 
-    auto operator=(const base_exception&) -> base_exception& = default;
-    auto operator=(base_exception&&) -> base_exception& = default;
+    auto operator=(const base_exception&) & -> base_exception& = default;
+    auto operator=(base_exception&&) & -> base_exception& = default;
 
-    [[nodiscard]] auto what() const noexcept -> const char* override { return mMessage.c_str(); }
+    [[nodiscard]] auto what() const noexcept LIFETIMEBOUND -> const char* override
+    { return mMessage.c_str(); }
 };
 
 } // namespace al

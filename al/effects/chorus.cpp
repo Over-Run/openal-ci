@@ -11,9 +11,9 @@
 #include "alnumeric.h"
 #include "core/logging.h"
 #include "effects.h"
+#include "gsl/gsl"
 
 #if ALSOFT_EAX
-#include <cassert>
 #include "al/eax/effect.h"
 #include "al/eax/exception.h"
 #include "al/eax/utils.h"
@@ -48,33 +48,33 @@ constexpr ALenum EnumFromWaveform(ChorusWaveform type)
         int{al::to_underlying(type)})};
 }
 
-constexpr EffectProps genDefaultChorusProps() noexcept
+consteval auto genDefaultChorusProps() noexcept -> EffectProps
 {
-    ChorusProps props{};
-    props.Waveform = WaveformFromEnum(AL_CHORUS_DEFAULT_WAVEFORM).value();
-    props.Phase = AL_CHORUS_DEFAULT_PHASE;
-    props.Rate = AL_CHORUS_DEFAULT_RATE;
-    props.Depth = AL_CHORUS_DEFAULT_DEPTH;
-    props.Feedback = AL_CHORUS_DEFAULT_FEEDBACK;
-    props.Delay = AL_CHORUS_DEFAULT_DELAY;
-    return props;
+    return ChorusProps{
+        /* NOLINTNEXTLINE(bugprone-unchecked-optional-access) */
+        .Waveform = WaveformFromEnum(AL_CHORUS_DEFAULT_WAVEFORM).value(),
+        .Phase = AL_CHORUS_DEFAULT_PHASE,
+        .Rate = AL_CHORUS_DEFAULT_RATE,
+        .Depth = AL_CHORUS_DEFAULT_DEPTH,
+        .Feedback = AL_CHORUS_DEFAULT_FEEDBACK,
+        .Delay = AL_CHORUS_DEFAULT_DELAY};
 }
 
-constexpr EffectProps genDefaultFlangerProps() noexcept
+consteval auto genDefaultFlangerProps() noexcept -> EffectProps
 {
-    ChorusProps props{};
-    props.Waveform = WaveformFromEnum(AL_FLANGER_DEFAULT_WAVEFORM).value();
-    props.Phase = AL_FLANGER_DEFAULT_PHASE;
-    props.Rate = AL_FLANGER_DEFAULT_RATE;
-    props.Depth = AL_FLANGER_DEFAULT_DEPTH;
-    props.Feedback = AL_FLANGER_DEFAULT_FEEDBACK;
-    props.Delay = AL_FLANGER_DEFAULT_DELAY;
-    return props;
+    return ChorusProps{
+        /* NOLINTNEXTLINE(bugprone-unchecked-optional-access) */
+        .Waveform = WaveformFromEnum(AL_FLANGER_DEFAULT_WAVEFORM).value(),
+        .Phase = AL_FLANGER_DEFAULT_PHASE,
+        .Rate = AL_FLANGER_DEFAULT_RATE,
+        .Depth = AL_FLANGER_DEFAULT_DEPTH,
+        .Feedback = AL_FLANGER_DEFAULT_FEEDBACK,
+        .Delay = AL_FLANGER_DEFAULT_DELAY};
 }
 
 } // namespace
 
-const EffectProps ChorusEffectProps{genDefaultChorusProps()};
+constinit const EffectProps ChorusEffectProps(genDefaultChorusProps());
 
 void ChorusEffectHandler::SetParami(ALCcontext *context, ChorusProps &props, ALenum param, int val)
 {
@@ -165,7 +165,7 @@ void ChorusEffectHandler::GetParamfv(ALCcontext *context, const ChorusProps &pro
 { GetParamf(context, props, param, vals); }
 
 
-const EffectProps FlangerEffectProps{genDefaultFlangerProps()};
+constinit const EffectProps FlangerEffectProps(genDefaultFlangerProps());
 
 void FlangerEffectHandler::SetParami(ALCcontext *context, ChorusProps &props, ALenum param, int val)
 {
@@ -316,7 +316,7 @@ struct EaxChorusTraits {
     static constexpr auto efx_default_feedback() { return AL_CHORUS_DEFAULT_FEEDBACK; }
     static constexpr auto efx_default_delay() { return AL_CHORUS_DEFAULT_DELAY; }
 
-    static ChorusWaveform eax_waveform(unsigned long type)
+    static constexpr auto eax_waveform(unsigned long type) -> ChorusWaveform
     {
         if(type == EAX_CHORUS_SINUSOID) return ChorusWaveform::Sinusoid;
         if(type == EAX_CHORUS_TRIANGLE) return ChorusWaveform::Triangle;
@@ -381,7 +381,7 @@ struct EaxFlangerTraits {
     static constexpr auto efx_default_feedback() { return AL_FLANGER_DEFAULT_FEEDBACK; }
     static constexpr auto efx_default_delay() { return AL_FLANGER_DEFAULT_DELAY; }
 
-    static ChorusWaveform eax_waveform(unsigned long type)
+    static constexpr auto eax_waveform(unsigned long type) -> ChorusWaveform
     {
         if(type == EAX_FLANGER_SINUSOID) return ChorusWaveform::Sinusoid;
         if(type == EAX_FLANGER_TRIANGLE) return ChorusWaveform::Triangle;
@@ -477,13 +477,13 @@ struct ChorusFlangerEffect {
 public:
     static void SetDefaults(EaxEffectProps &props)
     {
-        auto&& all = props.emplace<EaxProps>();
-        all.ulWaveform = Traits::eax_default_waveform();
-        all.lPhase = Traits::eax_default_phase();
-        all.flRate = Traits::eax_default_rate();
-        all.flDepth = Traits::eax_default_depth();
-        all.flFeedback = Traits::eax_default_feedback();
-        all.flDelay = Traits::eax_default_delay();
+        props = EaxProps{
+            .ulWaveform = Traits::eax_default_waveform(),
+            .lPhase = Traits::eax_default_phase(),
+            .flRate = Traits::eax_default_rate(),
+            .flDepth = Traits::eax_default_depth(),
+            .flFeedback = Traits::eax_default_feedback(),
+            .flDelay = Traits::eax_default_delay()};
     }
 
 
@@ -491,31 +491,15 @@ public:
     {
         switch(call.get_property_id())
         {
-        case Traits::eax_none_param_id():
-            break;
-        case Traits::eax_allparameters_param_id():
-            call.template set_value<Exception>(all);
-            break;
-        case Traits::eax_waveform_param_id():
-            call.template set_value<Exception>(all.ulWaveform);
-            break;
-        case Traits::eax_phase_param_id():
-            call.template set_value<Exception>(all.lPhase);
-            break;
-        case Traits::eax_rate_param_id():
-            call.template set_value<Exception>(all.flRate);
-            break;
-        case Traits::eax_depth_param_id():
-            call.template set_value<Exception>(all.flDepth);
-            break;
-        case Traits::eax_feedback_param_id():
-            call.template set_value<Exception>(all.flFeedback);
-            break;
-        case Traits::eax_delay_param_id():
-            call.template set_value<Exception>(all.flDelay);
-            break;
-        default:
-            Committer::fail_unknown_property_id();
+        case Traits::eax_none_param_id(): break;
+        case Traits::eax_allparameters_param_id(): call.store(all); break;
+        case Traits::eax_waveform_param_id(): call.store(all.ulWaveform); break;
+        case Traits::eax_phase_param_id(): call.store(all.lPhase); break;
+        case Traits::eax_rate_param_id(): call.store(all.flRate); break;
+        case Traits::eax_depth_param_id(): call.store(all.flDepth); break;
+        case Traits::eax_feedback_param_id(): call.store(all.flFeedback); break;
+        case Traits::eax_delay_param_id(): call.store(all.flDelay); break;
+        default: Committer::fail_unknown_property_id();
         }
     }
 
@@ -559,7 +543,7 @@ public:
         props_ = props;
 
         al_props_.Waveform = Traits::eax_waveform(props.ulWaveform);
-        al_props_.Phase = static_cast<int>(props.lPhase);
+        al_props_.Phase = gsl::narrow_cast<int>(props.lPhase);
         al_props_.Rate = props.flRate;
         al_props_.Depth = props.flDepth;
         al_props_.Feedback = props.flFeedback;
@@ -586,18 +570,15 @@ using FlangerCommitter = EaxCommitter<EaxFlangerCommitter>;
 
 } // namespace
 
-template<>
-struct ChorusCommitter::Exception : public EaxException
-{
-    explicit Exception(const char *message) : EaxException{"EAX_CHORUS_EFFECT", message}
+template<> /* NOLINTNEXTLINE(clazy-copyable-polymorphic) Exceptions must be copyable. */
+struct ChorusCommitter::Exception : public EaxException {
+    explicit Exception(const std::string_view message) : EaxException{"EAX_CHORUS_EFFECT", message}
     { }
 };
 
-template<>
-[[noreturn]] void ChorusCommitter::fail(const char *message)
-{
-    throw Exception{message};
-}
+template<> [[noreturn]]
+void ChorusCommitter::fail(const std::string_view message)
+{ throw Exception{message}; }
 
 bool EaxChorusCommitter::commit(const EAXCHORUSPROPERTIES &props)
 {
@@ -623,18 +604,15 @@ void EaxChorusCommitter::Set(const EaxCall &call, EAXCHORUSPROPERTIES &props)
     Committer::Set(call, props);
 }
 
-template<>
-struct FlangerCommitter::Exception : public EaxException
-{
-    explicit Exception(const char *message) : EaxException{"EAX_FLANGER_EFFECT", message}
+template<> /* NOLINTNEXTLINE(clazy-copyable-polymorphic) Exceptions must be copyable. */
+struct FlangerCommitter::Exception : public EaxException {
+    explicit Exception(const std::string_view message) : EaxException{"EAX_FLANGER_EFFECT",message}
     { }
 };
 
-template<>
-[[noreturn]] void FlangerCommitter::fail(const char *message)
-{
-    throw Exception{message};
-}
+template<> [[noreturn]]
+void FlangerCommitter::fail(const std::string_view message)
+{ throw Exception{message}; }
 
 bool EaxFlangerCommitter::commit(const EAXFLANGERPROPERTIES &props)
 {

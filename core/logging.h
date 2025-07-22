@@ -1,13 +1,15 @@
 #ifndef CORE_LOGGING_H
 #define CORE_LOGGING_H
 
+#include <cstdint>
 #include <cstdio>
 
 #include "fmt/core.h"
+#include "gsl/gsl"
 #include "opthelpers.h"
 
 
-enum class LogLevel {
+enum class LogLevel : uint8_t {
     Disable,
     Error,
     Warning,
@@ -15,10 +17,11 @@ enum class LogLevel {
 };
 DECL_HIDDEN extern LogLevel gLogLevel;
 
-DECL_HIDDEN extern FILE *gLogFile;
+inline auto gLogFile = gsl::owner<FILE*>{};
 
 
-using LogCallbackFunc = void(*)(void *userptr, char level, const char *message, int length) noexcept;
+using LogCallbackFunc = auto(*)(void *userptr, char level, const char *message, int length)
+    noexcept -> void;
 
 void al_set_log_callback(LogCallbackFunc callback, void *userptr);
 

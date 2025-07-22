@@ -17,16 +17,14 @@
 
 namespace {
 
-constexpr EffectProps genDefaultProps() noexcept
+consteval auto genDefaultProps() noexcept -> EffectProps
 {
-    CompressorProps props{};
-    props.OnOff = AL_COMPRESSOR_DEFAULT_ONOFF;
-    return props;
+    return CompressorProps{.OnOff = AL_COMPRESSOR_DEFAULT_ONOFF};
 }
 
 } // namespace
 
-const EffectProps CompressorEffectProps{genDefaultProps()};
+constinit const EffectProps CompressorEffectProps(genDefaultProps());
 
 void CompressorEffectHandler::SetParami(ALCcontext *context, CompressorProps &props, ALenum param, int val)
 {
@@ -92,18 +90,15 @@ struct AllValidator {
 
 } // namespace
 
-template<>
-struct CompressorCommitter::Exception : public EaxException
-{
-    explicit Exception(const char *message) : EaxException{"EAX_CHORUS_EFFECT", message}
+template<> /* NOLINTNEXTLINE(clazy-copyable-polymorphic) Exceptions must be copyable. */
+struct CompressorCommitter::Exception : public EaxException {
+    explicit Exception(const std::string_view message) : EaxException{"EAX_CHORUS_EFFECT", message}
     { }
 };
 
-template<>
-[[noreturn]] void CompressorCommitter::fail(const char *message)
-{
-    throw Exception{message};
-}
+template<> [[noreturn]]
+void CompressorCommitter::fail(const std::string_view message)
+{ throw Exception{message}; }
 
 bool EaxCompressorCommitter::commit(const EAXAGCCOMPRESSORPROPERTIES &props)
 {
@@ -111,14 +106,14 @@ bool EaxCompressorCommitter::commit(const EAXAGCCOMPRESSORPROPERTIES &props)
         return false;
 
     mEaxProps = props;
-    mAlProps = CompressorProps{props.ulOnOff != 0};
+    mAlProps = CompressorProps{.OnOff = props.ulOnOff != 0};
 
     return true;
 }
 
 void EaxCompressorCommitter::SetDefaults(EaxEffectProps &props)
 {
-    props = EAXAGCCOMPRESSORPROPERTIES{EAXAGCCOMPRESSOR_DEFAULTONOFF};
+    props = EAXAGCCOMPRESSORPROPERTIES{.ulOnOff = EAXAGCCOMPRESSOR_DEFAULTONOFF};
 }
 
 void EaxCompressorCommitter::Get(const EaxCall &call, const EAXAGCCOMPRESSORPROPERTIES &props)
@@ -126,8 +121,8 @@ void EaxCompressorCommitter::Get(const EaxCall &call, const EAXAGCCOMPRESSORPROP
     switch(call.get_property_id())
     {
     case EAXAGCCOMPRESSOR_NONE: break;
-    case EAXAGCCOMPRESSOR_ALLPARAMETERS: call.set_value<Exception>(props); break;
-    case EAXAGCCOMPRESSOR_ONOFF: call.set_value<Exception>(props.ulOnOff); break;
+    case EAXAGCCOMPRESSOR_ALLPARAMETERS: call.store(props); break;
+    case EAXAGCCOMPRESSOR_ONOFF: call.store(props.ulOnOff); break;
     default: fail_unknown_property_id();
     }
 }

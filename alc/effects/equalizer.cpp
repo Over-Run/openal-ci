@@ -118,8 +118,8 @@ void EqualizerState::update(const ContextBase *context, const EffectSlot *slot,
     const EffectProps *props_, const EffectTarget target)
 {
     auto &props = std::get<EqualizerProps>(*props_);
-    const auto *device = context->mDevice;
-    auto frequency = static_cast<float>(device->mSampleRate);
+    auto const device = al::get_not_null(context->mDevice);
+    auto const frequency = static_cast<float>(device->mSampleRate);
 
     /* Calculate coefficients for the each type of filter. Note that the shelf
      * and peaking filters' gain is for the centerpoint of the transition band,
@@ -192,8 +192,8 @@ struct EqualizerStateFactory final : public EffectStateFactory {
 
 } // namespace
 
-EffectStateFactory *EqualizerStateFactory_getFactory()
+auto EqualizerStateFactory_getFactory() -> gsl::strict_not_null<EffectStateFactory*>
 {
     static EqualizerStateFactory EqualizerFactory{};
-    return &EqualizerFactory;
+    return gsl::make_not_null(&EqualizerFactory);
 }

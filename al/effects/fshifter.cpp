@@ -12,8 +12,6 @@
 #include "effects.h"
 
 #if ALSOFT_EAX
-#include <cassert>
-
 #include "al/eax/effect.h"
 #include "al/eax/exception.h"
 #include "al/eax/utils.h"
@@ -43,18 +41,20 @@ constexpr ALenum EnumFromDirection(FShifterDirection dir)
     throw std::runtime_error{fmt::format("Invalid direction: {}", int{al::to_underlying(dir)})};
 }
 
-constexpr EffectProps genDefaultProps() noexcept
+consteval EffectProps genDefaultProps() noexcept
 {
+    /* NOLINTBEGIN(bugprone-unchecked-optional-access) */
     FshifterProps props{};
     props.Frequency      = AL_FREQUENCY_SHIFTER_DEFAULT_FREQUENCY;
     props.LeftDirection  = DirectionFromEmum(AL_FREQUENCY_SHIFTER_DEFAULT_LEFT_DIRECTION).value();
     props.RightDirection = DirectionFromEmum(AL_FREQUENCY_SHIFTER_DEFAULT_RIGHT_DIRECTION).value();
     return props;
+    /* NOLINTEND(bugprone-unchecked-optional-access) */
 }
 
 } // namespace
 
-const EffectProps FshifterEffectProps{genDefaultProps()};
+constinit const EffectProps FshifterEffectProps(genDefaultProps());
 
 void FshifterEffectHandler::SetParami(ALCcontext *context, FshifterProps &props, ALenum param, int val)
 {
@@ -181,56 +181,48 @@ struct AllValidator {
 
 } // namespace
 
-template<>
+template<> /* NOLINTNEXTLINE(clazy-copyable-polymorphic) Exceptions must be copyable. */
 struct FrequencyShifterCommitter::Exception : public EaxException {
-    explicit Exception(const char *message) : EaxException{"EAX_FREQUENCY_SHIFTER_EFFECT", message}
+    explicit Exception(const std::string_view message)
+        : EaxException{"EAX_FREQUENCY_SHIFTER_EFFECT", message}
     { }
 };
 
-template<>
-[[noreturn]] void FrequencyShifterCommitter::fail(const char *message)
-{
-    throw Exception{message};
-}
+template<> [[noreturn]]
+void FrequencyShifterCommitter::fail(const std::string_view message)
+{ throw Exception{message}; }
 
 bool EaxFrequencyShifterCommitter::commit(const EAXFREQUENCYSHIFTERPROPERTIES &props)
 {
     if(auto *cur = std::get_if<EAXFREQUENCYSHIFTERPROPERTIES>(&mEaxProps); cur && *cur == props)
         return false;
 
-    mEaxProps = props;
-
-    auto get_direction = [](unsigned long dir) noexcept
+    static constexpr auto get_direction = [](unsigned long dir) noexcept
     {
-        if(dir == EAX_FREQUENCYSHIFTER_DOWN)
-            return FShifterDirection::Down;
-        if(dir == EAX_FREQUENCYSHIFTER_UP)
-            return FShifterDirection::Up;
+        switch(dir)
+        {
+        case EAX_FREQUENCYSHIFTER_DOWN: return FShifterDirection::Down;
+        case EAX_FREQUENCYSHIFTER_UP: return FShifterDirection::Up;
+        default: break;
+        }
         return FShifterDirection::Off;
     };
 
-    mAlProps = [&]{
-        FshifterProps ret{};
-        ret.Frequency = props.flFrequency;
-        ret.LeftDirection = get_direction(props.ulLeftDirection);
-        ret.RightDirection = get_direction(props.ulRightDirection);
-        return ret;
-    }();
+    mEaxProps = props;
+    mAlProps = FshifterProps{
+        .Frequency = props.flFrequency,
+        .LeftDirection = get_direction(props.ulLeftDirection),
+        .RightDirection = get_direction(props.ulRightDirection)};
 
     return true;
 }
 
 void EaxFrequencyShifterCommitter::SetDefaults(EaxEffectProps &props)
 {
-    static constexpr EAXFREQUENCYSHIFTERPROPERTIES defprops{[]
-    {
-        EAXFREQUENCYSHIFTERPROPERTIES ret{};
-        ret.flFrequency = EAXFREQUENCYSHIFTER_DEFAULTFREQUENCY;
-        ret.ulLeftDirection = EAXFREQUENCYSHIFTER_DEFAULTLEFTDIRECTION;
-        ret.ulRightDirection = EAXFREQUENCYSHIFTER_DEFAULTRIGHTDIRECTION;
-        return ret;
-    }()};
-    props = defprops;
+    props = EAXFREQUENCYSHIFTERPROPERTIES{
+        .flFrequency = EAXFREQUENCYSHIFTER_DEFAULTFREQUENCY,
+        .ulLeftDirection = EAXFREQUENCYSHIFTER_DEFAULTLEFTDIRECTION,
+        .ulRightDirection = EAXFREQUENCYSHIFTER_DEFAULTRIGHTDIRECTION};
 }
 
 void EaxFrequencyShifterCommitter::Get(const EaxCall &call, const EAXFREQUENCYSHIFTERPROPERTIES &props)
@@ -238,10 +230,10 @@ void EaxFrequencyShifterCommitter::Get(const EaxCall &call, const EAXFREQUENCYSH
     switch(call.get_property_id())
     {
     case EAXFREQUENCYSHIFTER_NONE: break;
-    case EAXFREQUENCYSHIFTER_ALLPARAMETERS: call.set_value<Exception>(props); break;
-    case EAXFREQUENCYSHIFTER_FREQUENCY: call.set_value<Exception>(props.flFrequency); break;
-    case EAXFREQUENCYSHIFTER_LEFTDIRECTION: call.set_value<Exception>(props.ulLeftDirection); break;
-    case EAXFREQUENCYSHIFTER_RIGHTDIRECTION: call.set_value<Exception>(props.ulRightDirection); break;
+    case EAXFREQUENCYSHIFTER_ALLPARAMETERS: call.store(props); break;
+    case EAXFREQUENCYSHIFTER_FREQUENCY: call.store(props.flFrequency); break;
+    case EAXFREQUENCYSHIFTER_LEFTDIRECTION: call.store(props.ulLeftDirection); break;
+    case EAXFREQUENCYSHIFTER_RIGHTDIRECTION: call.store(props.ulRightDirection); break;
     default: fail_unknown_property_id();
     }
 }

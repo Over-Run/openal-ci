@@ -6,17 +6,19 @@
 #include <array>
 #include <atomic>
 #include <bitset>
+#include <concepts>
 #include <cstdint>
+#include <functional>
 #include <string_view>
 #include <utility>
 
 #include "AL/al.h"
 #include "AL/alc.h"
 
-#include "almalloc.h"
 #include "alnumeric.h"
 #include "core/effects/base.h"
 #include "core/effectslot.h"
+#include "gsl/gsl"
 #include "intrusive_ptr.h"
 
 #if ALSOFT_EAX
@@ -32,11 +34,12 @@
 struct ALbuffer;
 
 #if ALSOFT_EAX
+/* NOLINTNEXTLINE(clazy-copyable-polymorphic) Exceptions must be copyable. */
 class EaxFxSlotException : public EaxException {
 public:
-	explicit EaxFxSlotException(const char* message)
+    explicit EaxFxSlotException(const std::string_view message)
 		: EaxException{"EAX_FX_SLOT", message}
-	{}
+    { }
 };
 #endif // ALSOFT_EAX
 
@@ -65,12 +68,12 @@ struct ALeffectslot {
 
     std::atomic<ALuint> mRef{0u};
 
-    EffectSlot *mSlot{nullptr};
+    gsl::strict_not_null<EffectSlot*> mSlot;
 
     /* Self ID */
     ALuint id{};
 
-    explicit ALeffectslot(ALCcontext *context);
+    explicit ALeffectslot(gsl::strict_not_null<ALCcontext*> context);
     ALeffectslot(const ALeffectslot&) = delete;
     ALeffectslot& operator=(const ALeffectslot&) = delete;
     ~ALeffectslot();
@@ -83,16 +86,17 @@ struct ALeffectslot {
         return al::intrusive_ptr{this};
     }
 
-    ALenum initEffect(ALuint effectId, ALenum effectType, const EffectProps &effectProps,
-        ALCcontext *context);
-    void updateProps(ALCcontext *context) const;
+    auto initEffect(ALuint effectId, ALenum effectType, const EffectProps &effectProps,
+        gsl::strict_not_null<ALCcontext*> context) -> void;
+    void updateProps(gsl::strict_not_null<ALCcontext*> context) const;
 
-    static void SetName(ALCcontext *context, ALuint id, std::string_view name);
+    static void SetName(gsl::strict_not_null<ALCcontext*> context, ALuint id,
+        std::string_view name);
 
 
 #if ALSOFT_EAX
 public:
-    void eax_initialize(ALCcontext& al_context, EaxFxSlotIndexValue index);
+    void eax_initialize(EaxFxSlotIndexValue index);
 
     [[nodiscard]]
     auto eax_get_index() const noexcept -> EaxFxSlotIndexValue { return mEaxFXSlotIndex; }
@@ -100,7 +104,7 @@ public:
     auto eax_get_eax_fx_slot() const noexcept -> const EAX50FXSLOTPROPERTIES& { return mEax; }
 
     // Returns `true` if all sources should be updated, or `false` otherwise.
-    [[nodiscard]] auto eax_dispatch(const EaxCall& call) -> bool
+    [[nodiscard]] auto eax_dispatch(const EaxCall &call) -> bool
     { return call.is_get() ? eax_get(call) : eax_set(call); }
 
     void eax_commit();
@@ -128,11 +132,8 @@ private:
 
     struct EaxRangeValidator {
         template<typename TValue>
-        void operator()(
-            const char* name,
-            const TValue& value,
-            const TValue& min_value,
-            const TValue& max_value) const
+        void operator()(const std::string_view name, const TValue &value, const TValue &min_value,
+            const TValue &max_value) const
         {
             eax_validate_range<Exception>(name, value, min_value, max_value);
         }
@@ -248,7 +249,7 @@ private:
         }
     };
 
-    ALCcontext* mEaxALContext{};
+    gsl::strict_not_null<ALCcontext*> const mEaxALContext;
     EaxFxSlotIndexValue mEaxFXSlotIndex{};
     int mEaxVersion{}; // Current EAX version.
     std::bitset<eax_dirty_bit_count> mEaxDf; // Dirty flags for the current EAX version.
@@ -258,37 +259,35 @@ private:
     Eax5State mEax5{}; // EAX5 state.
     EAX50FXSLOTPROPERTIES mEax{}; // Current EAX state.
 
-    [[noreturn]] static void eax_fail(const char* message);
+    [[noreturn]] static void eax_fail(const std::string_view message);
     [[noreturn]] static void eax_fail_unknown_effect_id();
     [[noreturn]] static void eax_fail_unknown_property_id();
     [[noreturn]] static void eax_fail_unknown_version();
 
-    // Gets a new value from EAX call,
-    // validates it,
-    // sets a dirty flag only if the new value differs form the old one,
-    // and assigns the new value.
-    template<typename TValidator, size_t DirtyBit, typename TProperties>
-    static void eax_fx_slot_set(const EaxCall& call, TProperties& dst,
-        std::bitset<eax_dirty_bit_count>& dirty_flags)
+    /* Gets a new value from EAX call, validates it, sets a dirty flag only if
+     * the new value differs form the old one, and assigns the new value.
+     */
+    template<typename TValidator>
+    void eax_fx_slot_set(const EaxCall &call, auto &dst, size_t dirty_bit)
     {
-        const auto& src = call.get_value<Exception, const TProperties>();
+        const auto &src = call.load<const std::remove_cvref_t<decltype(dst)>>();
         TValidator{}(src);
         if(dst != src)
-            dirty_flags.set(DirtyBit);
-        dst = src;
+        {
+            mEaxDf.set(dirty_bit);
+            dst = src;
+        }
     }
 
-    // Gets a new value from EAX call,
-    // validates it,
-    // sets a dirty flag without comparing the values,
-    // and assigns the new value.
-    template<typename TValidator, size_t DirtyBit, typename TProperties>
-    static void eax_fx_slot_set_dirty(const EaxCall& call, TProperties& dst,
-        std::bitset<eax_dirty_bit_count>& dirty_flags)
+    /* Gets a new value from EAX call, validates it, sets a dirty flag without
+     * comparing the values, and assigns the new value.
+     */
+    template<typename TValidator>
+    void eax_fx_slot_set_dirty(const EaxCall &call, auto &dst, size_t dirty_bit)
     {
-        const auto& src = call.get_value<Exception, const TProperties>();
+        const auto &src = call.load<const std::remove_cvref_t<decltype(dst)>>();
         TValidator{}(src);
-        dirty_flags.set(DirtyBit);
+        mEaxDf.set(dirty_bit);
         dst = src;
     }
 
@@ -333,21 +332,13 @@ private:
     // Returns `true` if all sources should be updated, or `false` otherwise.
     bool eax_set(const EaxCall& call);
 
-    template<
-        size_t DirtyBit,
-        typename TMemberResult,
-        typename TProps,
-        typename TState>
-    void eax_fx_slot_commit_property(TState& state, std::bitset<eax_dirty_bit_count>& dst_df,
-        TMemberResult TProps::*member) noexcept
+    void eax_fx_slot_commit_property(auto &state, std::bitset<eax_dirty_bit_count> &dst_df,
+        size_t dirty_bit, std::invocable<decltype(mEax)> auto member) noexcept
     {
-        auto& src_i = state.i;
-        auto& dst_i = mEax;
-
-        if(mEaxDf.test(DirtyBit))
+        if(mEaxDf.test(dirty_bit))
         {
-            dst_df.set(DirtyBit);
-            dst_i.*member = src_i.*member;
+            dst_df.set(dirty_bit);
+            std::invoke(member, mEax) = std::invoke(member, state.i);
         }
     }
 
@@ -366,18 +357,19 @@ private:
 public:
     class EaxDeleter {
     public:
-        void operator()(ALeffectslot *effect_slot);
+        void operator()(gsl::not_null<ALeffectslot*> effect_slot);
     };
 #endif // ALSOFT_EAX
 };
 
-void UpdateAllEffectSlotProps(ALCcontext *context);
+void UpdateAllEffectSlotProps(gsl::strict_not_null<ALCcontext*> context);
 
 #if ALSOFT_EAX
 using EaxAlEffectSlotUPtr = std::unique_ptr<ALeffectslot, ALeffectslot::EaxDeleter>;
 
-EaxAlEffectSlotUPtr eax_create_al_effect_slot(ALCcontext& context);
-void eax_delete_al_effect_slot(ALCcontext& context, ALeffectslot& effect_slot);
+auto eax_create_al_effect_slot(gsl::strict_not_null<ALCcontext*> context) -> EaxAlEffectSlotUPtr;
+void eax_delete_al_effect_slot(gsl::strict_not_null<ALCcontext*> context,
+    gsl::strict_not_null<ALeffectslot*> effect_slot);
 #endif // ALSOFT_EAX
 
 struct EffectSlotSubList {

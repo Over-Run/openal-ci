@@ -25,14 +25,16 @@
 #endif
 
 #include "almalloc.h"
+#include "gsl/gsl"
 
 namespace {
 
+/* NOLINTBEGIN(cert-err58-cpp) */
 struct BackendNamePair {
     QString backend_name;
     QString full_string;
 };
-const std::array backendList{
+const auto backendList = std::array{
 #if HAVE_PIPEWIRE
     BackendNamePair{ QStringLiteral("pipewire"), QStringLiteral("PipeWire") },
 #endif
@@ -83,7 +85,7 @@ struct NameValuePair {
     QString name;
     QString value;
 };
-const std::array speakerModeList{
+const auto speakerModeList = std::array{
     NameValuePair{ QStringLiteral("Autodetect"), QStringLiteral("") },
     NameValuePair{ QStringLiteral("Mono"), QStringLiteral("mono") },
     NameValuePair{ QStringLiteral("Stereo"), QStringLiteral("stereo") },
@@ -98,7 +100,7 @@ const std::array speakerModeList{
     NameValuePair{ QStringLiteral("Ambisonic, 3rd Order"), QStringLiteral("ambi3") },
     NameValuePair{ QStringLiteral("Ambisonic, 4th Order"), QStringLiteral("ambi4") },
 };
-const std::array sampleTypeList{
+const auto sampleTypeList = std::array{
     NameValuePair{ QStringLiteral("Autodetect"), QStringLiteral("") },
     NameValuePair{ QStringLiteral("8-bit int"), QStringLiteral("int8") },
     NameValuePair{ QStringLiteral("8-bit uint"), QStringLiteral("uint8") },
@@ -108,7 +110,7 @@ const std::array sampleTypeList{
     NameValuePair{ QStringLiteral("32-bit uint"), QStringLiteral("uint32") },
     NameValuePair{ QStringLiteral("32-bit float"), QStringLiteral("float32") },
 };
-const std::array resamplerList{
+const auto resamplerList = std::array{
     NameValuePair{ QStringLiteral("Point"), QStringLiteral("point") },
     NameValuePair{ QStringLiteral("Linear"), QStringLiteral("linear") },
     NameValuePair{ QStringLiteral("Cubic Spline"), QStringLiteral("spline") },
@@ -121,64 +123,62 @@ const std::array resamplerList{
     NameValuePair{ QStringLiteral("47th order Sinc (fast)"), QStringLiteral("fast_bsinc48") },
     NameValuePair{ QStringLiteral("47th order Sinc"), QStringLiteral("bsinc48") },
 };
-const std::array stereoModeList{
+const auto stereoModeList = std::array{
     NameValuePair{ QStringLiteral("Autodetect"), QStringLiteral("") },
     NameValuePair{ QStringLiteral("Speakers"), QStringLiteral("speakers") },
     NameValuePair{ QStringLiteral("Headphones"), QStringLiteral("headphones") },
 };
-const std::array stereoEncList{
+const auto stereoEncList = std::array{
     NameValuePair{ QStringLiteral("Default"), QStringLiteral("") },
     NameValuePair{ QStringLiteral("Basic"), QStringLiteral("panpot") },
     NameValuePair{ QStringLiteral("UHJ"), QStringLiteral("uhj") },
     NameValuePair{ QStringLiteral("Binaural"), QStringLiteral("hrtf") },
 };
-const std::array ambiFormatList{
+const auto ambiFormatList = std::array{
     NameValuePair{ QStringLiteral("Default"), QStringLiteral("") },
     NameValuePair{ QStringLiteral("AmbiX (ACN, SN3D)"), QStringLiteral("ambix") },
     NameValuePair{ QStringLiteral("Furse-Malham"), QStringLiteral("fuma") },
     NameValuePair{ QStringLiteral("ACN, N3D"), QStringLiteral("acn+n3d") },
     NameValuePair{ QStringLiteral("ACN, FuMa"), QStringLiteral("acn+fuma") },
 };
-const std::array hrtfModeList{
+const auto hrtfModeList = std::array{
     NameValuePair{ QStringLiteral("1st Order Ambisonic"), QStringLiteral("ambi1") },
     NameValuePair{ QStringLiteral("2nd Order Ambisonic"), QStringLiteral("ambi2") },
     NameValuePair{ QStringLiteral("3rd Order Ambisonic"), QStringLiteral("ambi3") },
+    NameValuePair{ QStringLiteral("4th Order Ambisonic"), QStringLiteral("ambi4") },
     NameValuePair{ QStringLiteral("Default (Full)"), QStringLiteral("") },
     NameValuePair{ QStringLiteral("Full"), QStringLiteral("full") },
 };
+/* NOLINTEND(cert-err58-cpp) */
 
 auto GetDefaultIndex(const std::span<const NameValuePair> list) -> uint8_t
 {
     auto iter = std::ranges::find(list, QStringLiteral(""), &NameValuePair::value);
     if(iter != list.end())
-        return static_cast<uint8_t>(std::distance(list.begin(), iter));
+        return gsl::narrow<uint8_t>(std::distance(list.begin(), iter));
     throw std::runtime_error{"Failed to find default entry"};
 }
 
 #ifdef Q_OS_WIN32
-struct CoTaskMemDeleter {
-    void operator()(void *buffer) { CoTaskMemFree(buffer); }
-};
-/* NOLINTNEXTLINE(*-avoid-c-arrays) */
-using WCharBufferPtr = std::unique_ptr<WCHAR[],CoTaskMemDeleter>;
+using WCharBufferPtr = std::unique_ptr<WCHAR, decltype([](WCHAR *buffer)
+    { CoTaskMemFree(buffer); })>;
 #endif
 
 QString getDefaultConfigName()
 {
 #ifdef Q_OS_WIN32
-    const char *fname{"alsoft.ini"};
-    static constexpr auto get_appdata_path = []() -> QString
+    auto *fname = "alsoft.ini";
+    auto base = std::invoke([]() -> QString
     {
         auto buffer = WCharBufferPtr{};
-        if(const HRESULT hr{SHGetKnownFolderPath(FOLDERID_RoamingAppData, KF_FLAG_DONT_UNEXPAND,
-            nullptr, al::out_ptr(buffer))}; SUCCEEDED(hr))
+        if(const auto hr = SHGetKnownFolderPath(FOLDERID_RoamingAppData, KF_FLAG_DONT_UNEXPAND,
+            nullptr, al::out_ptr(buffer)); SUCCEEDED(hr))
             return QString::fromWCharArray(buffer.get());
         return QString{};
-    };
-    QString base = get_appdata_path();
+    });
 #else
-    const char *fname{"alsoft.conf"};
-    QString base = qgetenv("XDG_CONFIG_HOME");
+    auto *fname = "alsoft.conf";
+    auto base = QString{qgetenv("XDG_CONFIG_HOME")};
     if(base.isEmpty())
     {
         base = qgetenv("HOME");
@@ -194,17 +194,16 @@ QString getDefaultConfigName()
 QString getBaseDataPath()
 {
 #ifdef Q_OS_WIN32
-    static constexpr auto get_appdata_path = []() -> QString
+    auto base = std::invoke([]() -> QString
     {
         auto buffer = WCharBufferPtr{};
-        if(const HRESULT hr{SHGetKnownFolderPath(FOLDERID_RoamingAppData, KF_FLAG_DONT_UNEXPAND,
-            nullptr, al::out_ptr(buffer))}; SUCCEEDED(hr))
+        if(const auto hr = SHGetKnownFolderPath(FOLDERID_RoamingAppData, KF_FLAG_DONT_UNEXPAND,
+            nullptr, al::out_ptr(buffer)); SUCCEEDED(hr))
             return QString::fromWCharArray(buffer.get());
         return QString{};
-    };
-    QString base = get_appdata_path();
+    });
 #else
-    QString base = qgetenv("XDG_DATA_HOME");
+    auto base = QString{qgetenv("XDG_DATA_HOME")};
     if(base.isEmpty())
     {
         base = qgetenv("HOME");
@@ -215,27 +214,26 @@ QString getBaseDataPath()
     return base;
 }
 
-QStringList getAllDataPaths(const QString &append)
+auto getAllDataPaths(const QString &append) -> QStringList
 {
-    QStringList list;
+    auto list = QStringList{};
     list.append(getBaseDataPath());
 #ifdef Q_OS_WIN32
     // TODO: Common AppData path
 #else
-    QString paths = qgetenv("XDG_DATA_DIRS");
+    auto paths = QString{qgetenv("XDG_DATA_DIRS")};
     if(paths.isEmpty())
         paths = "/usr/local/share/:/usr/share/";
     list += paths.split(QChar(':'), Qt::SkipEmptyParts);
 #endif
-    QStringList::iterator iter = list.begin();
-    while(iter != list.end())
+    for(auto iter = list.begin();iter != list.end();)
     {
         if(iter->isEmpty())
             iter = list.erase(iter);
         else
         {
             iter->append(append);
-            iter++;
+            ++iter;
         }
     }
     return list;
@@ -243,22 +241,20 @@ QStringList getAllDataPaths(const QString &append)
 
 auto getValueFromName(const std::span<const NameValuePair> list, const QString &str) -> QString
 {
-    auto iter = std::ranges::find(list, str, &NameValuePair::name);
-    if(iter != list.end())
+    if(const auto iter = std::ranges::find(list, str, &NameValuePair::name); iter != list.end())
         return iter->value;
     return QString{};
 }
 
 auto getNameFromValue(const std::span<const NameValuePair> list, const QString &str) -> QString
 {
-    auto iter = std::ranges::find(list, str, &NameValuePair::value);
-    if(iter != list.end())
+    if(const auto iter = std::ranges::find(list, str, &NameValuePair::value); iter != list.end())
         return iter->name;
     return QString{};
 }
 
 
-Qt::CheckState getCheckState(const QVariant &var)
+auto getCheckState(const QVariant &var) -> Qt::CheckState
 {
     if(var.isNull())
         return Qt::PartiallyChecked;
@@ -267,7 +263,7 @@ Qt::CheckState getCheckState(const QVariant &var)
     return Qt::Unchecked;
 }
 
-QString getCheckValue(const QCheckBox *checkbox)
+auto getCheckValue(const QCheckBox *checkbox) -> QString
 {
     const Qt::CheckState state{checkbox->checkState()};
     if(state == Qt::Checked)
@@ -519,8 +515,8 @@ void MainWindow::closeEvent(QCloseEvent *event)
         event->accept();
     else
     {
-        QMessageBox::StandardButton btn = QMessageBox::warning(this,
-            tr("Apply changes?"), tr("Save changes before quitting?"),
+        const auto btn = QMessageBox::warning(this, tr("Apply changes?"),
+            tr("Save changes before quitting?"),
             QMessageBox::Save | QMessageBox::No | QMessageBox::Cancel);
         if(btn == QMessageBox::Save)
             saveCurrentConfig();
@@ -553,25 +549,25 @@ QStringList MainWindow::collectHrtfs()
 
     for(int i = 0;i < ui->hrtfFileList->count();i++)
     {
-        QDir dir(ui->hrtfFileList->item(i)->text());
-        QStringList fnames = dir.entryList(QDir::Files | QDir::Readable, QDir::Name);
+        const auto dir = QDir(ui->hrtfFileList->item(i)->text());
+        const auto fnames = dir.entryList(QDir::Files | QDir::Readable, QDir::Name);
         Q_FOREACH(const QString &fname, fnames)
         {
             if(!fname.endsWith(QStringLiteral(".mhr"), Qt::CaseInsensitive))
                 continue;
-            QString fullname{dir.absoluteFilePath(fname)};
+            const auto fullname = dir.absoluteFilePath(fname);
             if(processed.contains(fullname))
                 continue;
             processed.push_back(fullname);
 
-            QString name{fname.left(fname.length()-4)};
+            const auto name = fname.left(fname.length()-4);
             if(!ret.contains(name))
                 ret.push_back(name);
             else
             {
                 size_t i{2};
                 do {
-                    QString s = name+" #"+QString::number(i);
+                    const auto s = name+" #"+QString::number(i);
                     if(!ret.contains(s))
                     {
                         ret.push_back(s);
@@ -585,28 +581,28 @@ QStringList MainWindow::collectHrtfs()
 
     if(ui->defaultHrtfPathsCheckBox->isChecked())
     {
-        QStringList paths = getAllDataPaths(QStringLiteral("/openal/hrtf"));
+        const auto paths = getAllDataPaths(QStringLiteral("/openal/hrtf"));
         Q_FOREACH(const QString &name, paths)
         {
-            QDir dir{name};
-            QStringList fnames{dir.entryList(QDir::Files | QDir::Readable, QDir::Name)};
+            const auto dir = QDir{name};
+            const auto fnames = dir.entryList(QDir::Files | QDir::Readable, QDir::Name);
             Q_FOREACH(const QString &fname, fnames)
             {
                 if(!fname.endsWith(QStringLiteral(".mhr"), Qt::CaseInsensitive))
                     continue;
-                QString fullname{dir.absoluteFilePath(fname)};
+                const auto fullname = dir.absoluteFilePath(fname);
                 if(processed.contains(fullname))
                     continue;
                 processed.push_back(fullname);
 
-                QString name{fname.left(fname.length()-4)};
+                const auto name = fname.left(fname.length()-4);
                 if(!ret.contains(name))
                     ret.push_back(name);
                 else
                 {
                     size_t i{2};
                     do {
-                        QString s{name+" #"+QString::number(i)};
+                        const auto s = name+" #"+QString::number(i);
                         if(!ret.contains(s))
                         {
                             ret.push_back(s);
@@ -628,20 +624,20 @@ QStringList MainWindow::collectHrtfs()
 
 void MainWindow::loadConfigFromFile()
 {
-    QString fname = QFileDialog::getOpenFileName(this, tr("Select Files"));
+    const auto fname = QFileDialog::getOpenFileName(this, tr("Select Files"));
     if(fname.isEmpty() == false)
         loadConfig(fname);
 }
 
 void MainWindow::loadConfig(const QString &fname)
 {
-    QSettings settings{fname, QSettings::IniFormat};
+    const auto settings = QSettings{fname, QSettings::IniFormat};
 
-    QString sampletype{settings.value(QStringLiteral("sample-type")).toString()};
+    const auto sampletype = settings.value(QStringLiteral("sample-type")).toString();
     ui->sampleFormatCombo->setCurrentIndex(0);
     if(sampletype.isEmpty() == false)
     {
-        QString str{getNameFromValue(sampleTypeList, sampletype)};
+        const auto str = getNameFromValue(sampleTypeList, sampletype);
         if(!str.isEmpty())
         {
             const int j{ui->sampleFormatCombo->findText(str)};
@@ -649,13 +645,13 @@ void MainWindow::loadConfig(const QString &fname)
         }
     }
 
-    QString channelconfig{settings.value(QStringLiteral("channels")).toString()};
+    auto channelconfig = settings.value(QStringLiteral("channels")).toString();
     ui->channelConfigCombo->setCurrentIndex(0);
     if(channelconfig.isEmpty() == false)
     {
         if(channelconfig == QStringLiteral("surround51rear"))
             channelconfig = QStringLiteral("surround51");
-        QString str{getNameFromValue(speakerModeList, channelconfig)};
+        const auto str = getNameFromValue(speakerModeList, channelconfig);
         if(!str.isEmpty())
         {
             const int j{ui->channelConfigCombo->findText(str)};
@@ -663,7 +659,7 @@ void MainWindow::loadConfig(const QString &fname)
         }
     }
 
-    QString srate{settings.value(QStringLiteral("frequency")).toString()};
+    const auto srate = settings.value(QStringLiteral("frequency")).toString();
     if(srate.isEmpty())
         ui->sampleRateCombo->setCurrentIndex(0);
     else
@@ -703,29 +699,26 @@ void MainWindow::loadConfig(const QString &fname)
         }
     }
 
-    QString stereomode{settings.value(QStringLiteral("stereo-mode")).toString().trimmed()};
+    const auto stereomode = settings.value(QStringLiteral("stereo-mode")).toString().trimmed();
     ui->stereoModeCombo->setCurrentIndex(0);
     if(stereomode.isEmpty() == false)
     {
-        QString str{getNameFromValue(stereoModeList, stereomode)};
-        if(!str.isEmpty())
+        if(const auto str = getNameFromValue(stereoModeList, stereomode); !str.isEmpty())
         {
-            const int j{ui->stereoModeCombo->findText(str)};
-            if(j > 0) ui->stereoModeCombo->setCurrentIndex(j);
+            if(const auto j = ui->stereoModeCombo->findText(str); j > 0)
+                ui->stereoModeCombo->setCurrentIndex(j);
         }
     }
 
-    int periodsize{settings.value("period_size").toInt()};
     ui->periodSizeEdit->clear();
-    if(periodsize >= 64)
+    if(const auto periodsize = settings.value("period_size").toInt(); periodsize >= 64)
     {
         ui->periodSizeEdit->insert(QString::number(periodsize));
         updatePeriodSizeSlider();
     }
 
-    int periodcount{settings.value("periods").toInt()};
     ui->periodCountEdit->clear();
-    if(periodcount >= 2)
+    if(const auto periodcount = settings.value("periods").toInt(); periodcount >= 2)
     {
         ui->periodCountEdit->insert(QString::number(periodcount));
         updatePeriodCountSlider();
@@ -734,11 +727,11 @@ void MainWindow::loadConfig(const QString &fname)
     ui->outputLimiterCheckBox->setCheckState(getCheckState(settings.value(QStringLiteral("output-limiter"))));
     ui->outputDitherCheckBox->setCheckState(getCheckState(settings.value(QStringLiteral("dither"))));
 
-    QString stereopan{settings.value(QStringLiteral("stereo-encoding")).toString()};
     ui->stereoEncodingComboBox->setCurrentIndex(0);
-    if(stereopan.isEmpty() == false)
+    if(const auto stereopan = settings.value(QStringLiteral("stereo-encoding")).toString();
+        stereopan.isEmpty() == false)
     {
-        QString str{getNameFromValue(stereoEncList, stereopan)};
+        const auto str = getNameFromValue(stereoEncList, stereopan);
         if(!str.isEmpty())
         {
             const int j{ui->stereoEncodingComboBox->findText(str)};
@@ -746,11 +739,11 @@ void MainWindow::loadConfig(const QString &fname)
         }
     }
 
-    QString ambiformat{settings.value(QStringLiteral("ambi-format")).toString()};
     ui->ambiFormatComboBox->setCurrentIndex(0);
-    if(ambiformat.isEmpty() == false)
+    if(const auto ambiformat = settings.value(QStringLiteral("ambi-format")).toString();
+        ambiformat.isEmpty() == false)
     {
-        QString str{getNameFromValue(ambiFormatList, ambiformat)};
+        const auto str = getNameFromValue(ambiFormatList, ambiformat);
         if(!str.isEmpty())
         {
             const int j{ui->ambiFormatComboBox->findText(str)};
@@ -761,8 +754,7 @@ void MainWindow::loadConfig(const QString &fname)
     ui->decoderHQModeCheckBox->setChecked(getCheckState(settings.value(QStringLiteral("decoder/hq-mode"))));
     ui->decoderDistCompCheckBox->setCheckState(getCheckState(settings.value(QStringLiteral("decoder/distance-comp"))));
     ui->decoderNFEffectsCheckBox->setCheckState(getCheckState(settings.value(QStringLiteral("decoder/nfc"))));
-    double speakerdist{settings.value(QStringLiteral("decoder/speaker-dist"), 1.0).toDouble()};
-    ui->decoderSpeakerDistSpinBox->setValue(speakerdist);
+    ui->decoderSpeakerDistSpinBox->setValue(settings.value(QStringLiteral("decoder/speaker-dist"), 1.0).toDouble());
 
     ui->decoderQuadLineEdit->setText(settings.value(QStringLiteral("decoder/quad")).toString());
     ui->decoder51LineEdit->setText(settings.value(QStringLiteral("decoder/surround51")).toString());
@@ -819,12 +811,12 @@ void MainWindow::loadConfig(const QString &fname)
     ui->preferredHrtfComboBox->addItem(QStringLiteral("- Any -"));
     if(ui->defaultHrtfPathsCheckBox->isChecked())
     {
-        QStringList hrtfs{collectHrtfs()};
+        const auto hrtfs = collectHrtfs();
         Q_FOREACH(const QString &name, hrtfs)
             ui->preferredHrtfComboBox->addItem(name);
     }
 
-    QString defaulthrtf{settings.value(QStringLiteral("default-hrtf")).toString()};
+    const auto defaulthrtf = settings.value(QStringLiteral("default-hrtf")).toString();
     ui->preferredHrtfComboBox->setCurrentIndex(0);
     if(defaulthrtf.isEmpty() == false)
     {
@@ -877,7 +869,7 @@ void MainWindow::loadConfig(const QString &fname)
             }
             else if(backend.size() > 1)
             {
-                auto backendref = QStringView{backend}.right(backend.size()-1);
+                const auto backendref = QStringView{backend}.right(backend.size()-1);
                 std::ranges::for_each(backendList
                     | std::views::filter([backendref](const BackendNamePair &names)
                        { return backendref == names.backend_name; }),
@@ -888,7 +880,8 @@ void MainWindow::loadConfig(const QString &fname)
         ui->backendCheckBox->setChecked(lastWasEmpty);
     }
 
-    QString defaultreverb{settings.value(QStringLiteral("default-reverb")).toString().toLower()};
+    const auto defaultreverb = settings.value(QStringLiteral("default-reverb")).toString()
+        .toLower();
     ui->defaultReverbComboBox->setCurrentIndex(0);
     if(defaultreverb.isEmpty() == false)
     {
@@ -970,7 +963,7 @@ void MainWindow::saveCurrentConfig()
 
 void MainWindow::saveConfigAsFile()
 {
-    QString fname{QFileDialog::getOpenFileName(this, tr("Select Files"))};
+    const auto fname = QFileDialog::getOpenFileName(this, tr("Select Files"));
     if(fname.isEmpty() == false)
     {
         saveConfig(fname);
@@ -981,13 +974,13 @@ void MainWindow::saveConfigAsFile()
 
 void MainWindow::saveConfig(const QString &fname) const
 {
-    QSettings settings{fname, QSettings::IniFormat};
+    auto settings = QSettings{fname, QSettings::IniFormat};
 
     /* HACK: Compound any stringlist values into a comma-separated string. */
-    QStringList allkeys{settings.allKeys()};
+    auto allkeys = settings.allKeys();
     Q_FOREACH(const QString &key, allkeys)
     {
-        QStringList vals{settings.value(key).toStringList()};
+        const auto vals = settings.value(key).toStringList();
         if(vals.size() > 1)
             settings.setValue(key, vals.join(QChar(',')));
     }
@@ -995,7 +988,7 @@ void MainWindow::saveConfig(const QString &fname) const
     settings.setValue(QStringLiteral("sample-type"), getValueFromName(sampleTypeList, ui->sampleFormatCombo->currentText()));
     settings.setValue(QStringLiteral("channels"), getValueFromName(speakerModeList, ui->channelConfigCombo->currentText()));
 
-    uint rate{ui->sampleRateCombo->currentText().toUInt()};
+    const auto rate = ui->sampleRateCombo->currentText().toUInt();
     if(rate <= 0)
         settings.setValue(QStringLiteral("frequency"), QString{});
     else
@@ -1019,7 +1012,7 @@ void MainWindow::saveConfig(const QString &fname) const
     settings.setValue(QStringLiteral("decoder/hq-mode"), getCheckValue(ui->decoderHQModeCheckBox));
     settings.setValue(QStringLiteral("decoder/distance-comp"), getCheckValue(ui->decoderDistCompCheckBox));
     settings.setValue(QStringLiteral("decoder/nfc"), getCheckValue(ui->decoderNFEffectsCheckBox));
-    double speakerdist{ui->decoderSpeakerDistSpinBox->value()};
+    const auto speakerdist = ui->decoderSpeakerDistSpinBox->value();
     settings.setValue(QStringLiteral("decoder/speaker-dist"),
         (speakerdist != 1.0) ? QString::number(speakerdist) : QString{}
     );
@@ -1049,7 +1042,7 @@ void MainWindow::saveConfig(const QString &fname) const
         settings.setValue(QStringLiteral("default-hrtf"), QString{});
     else
     {
-        QString str{ui->preferredHrtfComboBox->currentText()};
+        const auto str = ui->preferredHrtfComboBox->currentText();
         settings.setValue(QStringLiteral("default-hrtf"), str);
     }
 
@@ -1065,7 +1058,7 @@ void MainWindow::saveConfig(const QString &fname) const
     std::ranges::for_each(std::views::iota(0, ui->enabledBackendList->count()),
         [&strlist,list=ui->enabledBackendList](int idx)
     {
-        auto label = list->item(idx)->text();
+        const auto label = list->item(idx)->text();
         std::ranges::for_each(backendList
             | std::views::filter([&label](const BackendNamePair &names)
                 { return label == names.full_string; }),
@@ -1075,7 +1068,7 @@ void MainWindow::saveConfig(const QString &fname) const
     std::ranges::for_each(std::views::iota(0, ui->disabledBackendList->count()),
         [&strlist,list=ui->disabledBackendList](int idx)
     {
-        auto label = list->item(idx)->text();
+        const auto label = list->item(idx)->text();
         std::ranges::for_each(backendList
             | std::views::filter([&label](const BackendNamePair &names)
                 { return label == names.full_string; }),
@@ -1093,7 +1086,7 @@ void MainWindow::saveConfig(const QString &fname) const
         settings.setValue(QStringLiteral("default-reverb"), QString{});
     else
     {
-        QString str{ui->defaultReverbComboBox->currentText().toLower()};
+        const auto str = ui->defaultReverbComboBox->currentText().toLower();
         settings.setValue(QStringLiteral("default-reverb"), str);
     }
 
@@ -1167,7 +1160,7 @@ void MainWindow::saveConfig(const QString &fname) const
     allkeys = settings.allKeys();
     Q_FOREACH(const QString &key, allkeys)
     {
-        QString str{settings.value(key).toString()};
+        const auto str = settings.value(key).toString();
         if(str.isEmpty())
             settings.remove(key);
     }
@@ -1200,7 +1193,7 @@ void MainWindow::updatePeriodSizeEdit(int size)
 
 void MainWindow::updatePeriodSizeSlider()
 {
-    int pos = ui->periodSizeEdit->text().toInt();
+    const auto pos = ui->periodSizeEdit->text().toInt();
     if(pos >= 64)
         ui->periodSizeSlider->setSliderPosition(std::min(pos, 8192));
     enableApplyButton();
@@ -1252,8 +1245,8 @@ void MainWindow::selectDecoderFile(QLineEdit *line, const char *caption)
             paths.removeLast();
         }
     }
-    QString fname{QFileDialog::getOpenFileName(this, tr(caption),
-        dir, tr("AmbDec Files (*.ambdec);;All Files (*.*)"))};
+    const auto fname = QFileDialog::getOpenFileName(this, tr(caption), dir,
+        tr("AmbDec Files (*.ambdec);;All Files (*.*)"));
     if(!fname.isEmpty())
     {
         line->setText(fname);
@@ -1272,8 +1265,8 @@ void MainWindow::updateJackBufferSizeEdit(int size)
 
 void MainWindow::updateJackBufferSizeSlider()
 {
-    int value{ui->jackBufferSizeLine->text().toInt()};
-    auto pos = static_cast<int>(floor(log2(value) + 0.5));
+    const auto value = ui->jackBufferSizeLine->text().toInt();
+    const auto pos = static_cast<int>(floor(log2(value) + 0.5));
     ui->jackBufferSizeSlider->setSliderPosition(pos);
     enableApplyButton();
 }
@@ -1288,7 +1281,7 @@ void MainWindow::updateHrtfModeLabel(int num)
 
 void MainWindow::addHrtfFile()
 {
-    QString path{QFileDialog::getExistingDirectory(this, tr("Select HRTF Path"))};
+    const auto path = QFileDialog::getExistingDirectory(this, tr("Select HRTF Path"));
     if(path.isEmpty() == false && !getAllDataPaths(QStringLiteral("/openal/hrtf")).contains(path))
     {
         ui->hrtfFileList->addItem(path);
@@ -1313,26 +1306,26 @@ void MainWindow::updateHrtfRemoveButton()
 
 void MainWindow::showEnabledBackendMenu(QPoint pt)
 {
-    QHash<QAction*,QString> actionMap;
+    auto actionMap = QHash<QAction*,QString>{};
 
     pt = ui->enabledBackendList->mapToGlobal(pt);
 
-    QMenu ctxmenu;
-    QAction *removeAction{ctxmenu.addAction(QIcon::fromTheme("list-remove"), "Remove")};
+    auto ctxmenu = QMenu{};
+    auto *removeAction = ctxmenu.addAction(QIcon::fromTheme("list-remove"), "Remove");
     if(ui->enabledBackendList->selectedItems().empty())
         removeAction->setEnabled(false);
     ctxmenu.addSeparator();
     for(size_t i{0};i < backendList.size();++i)
     {
-        QString backend{std::data(backendList[i].full_string)};
-        QAction *action{ctxmenu.addAction(QString("Add ")+backend)};
+        const auto &backend = backendList[i].full_string;
+        auto *action = ctxmenu.addAction(QString("Add ")+backend);
         actionMap[action] = backend;
         if(!ui->enabledBackendList->findItems(backend, Qt::MatchFixedString).empty() ||
            !ui->disabledBackendList->findItems(backend, Qt::MatchFixedString).empty())
             action->setEnabled(false);
     }
 
-    QAction *gotAction{ctxmenu.exec(pt)};
+    auto *gotAction = ctxmenu.exec(pt);
     if(gotAction == removeAction)
     {
         QList<gsl::owner<QListWidgetItem*>> selected{ui->enabledBackendList->selectedItems()};
@@ -1350,19 +1343,19 @@ void MainWindow::showEnabledBackendMenu(QPoint pt)
 
 void MainWindow::showDisabledBackendMenu(QPoint pt)
 {
-    QHash<QAction*,QString> actionMap;
+    auto actionMap = QHash<QAction*,QString>{};
 
     pt = ui->disabledBackendList->mapToGlobal(pt);
 
-    QMenu ctxmenu;
-    QAction *removeAction{ctxmenu.addAction(QIcon::fromTheme("list-remove"), "Remove")};
+    auto ctxmenu = QMenu{};
+    auto *removeAction = ctxmenu.addAction(QIcon::fromTheme("list-remove"), "Remove");
     if(ui->disabledBackendList->selectedItems().empty())
         removeAction->setEnabled(false);
     ctxmenu.addSeparator();
     for(size_t i{0};i < backendList.size();++i)
     {
-        QString backend{std::data(backendList[i].full_string)};
-        QAction *action{ctxmenu.addAction(QString("Add ")+backend)};
+        const auto &backend = backendList[i].full_string;
+        auto *action = ctxmenu.addAction(QString("Add ")+backend);
         actionMap[action] = backend;
         if(!ui->disabledBackendList->findItems(backend, Qt::MatchFixedString).empty() ||
            !ui->enabledBackendList->findItems(backend, Qt::MatchFixedString).empty())
@@ -1387,9 +1380,9 @@ void MainWindow::showDisabledBackendMenu(QPoint pt)
 
 void MainWindow::selectOSSPlayback()
 {
-    QString current{ui->ossDefaultDeviceLine->text()};
+    auto current = ui->ossDefaultDeviceLine->text();
     if(current.isEmpty()) current = ui->ossDefaultDeviceLine->placeholderText();
-    QString fname{QFileDialog::getOpenFileName(this, tr("Select Playback Device"), current)};
+    const auto fname = QFileDialog::getOpenFileName(this, tr("Select Playback Device"), current);
     if(!fname.isEmpty())
     {
         ui->ossDefaultDeviceLine->setText(fname);
@@ -1399,9 +1392,9 @@ void MainWindow::selectOSSPlayback()
 
 void MainWindow::selectOSSCapture()
 {
-    QString current{ui->ossDefaultCaptureLine->text()};
+    auto current = ui->ossDefaultCaptureLine->text();
     if(current.isEmpty()) current = ui->ossDefaultCaptureLine->placeholderText();
-    QString fname{QFileDialog::getOpenFileName(this, tr("Select Capture Device"), current)};
+    const auto fname = QFileDialog::getOpenFileName(this, tr("Select Capture Device"), current);
     if(!fname.isEmpty())
     {
         ui->ossDefaultCaptureLine->setText(fname);
@@ -1411,9 +1404,9 @@ void MainWindow::selectOSSCapture()
 
 void MainWindow::selectSolarisPlayback()
 {
-    QString current{ui->solarisDefaultDeviceLine->text()};
+    auto current = ui->solarisDefaultDeviceLine->text();
     if(current.isEmpty()) current = ui->solarisDefaultDeviceLine->placeholderText();
-    QString fname{QFileDialog::getOpenFileName(this, tr("Select Playback Device"), current)};
+    const auto fname = QFileDialog::getOpenFileName(this, tr("Select Playback Device"), current);
     if(!fname.isEmpty())
     {
         ui->solarisDefaultDeviceLine->setText(fname);
@@ -1423,8 +1416,8 @@ void MainWindow::selectSolarisPlayback()
 
 void MainWindow::selectWaveOutput()
 {
-    QString fname{QFileDialog::getSaveFileName(this, tr("Select Wave File Output"),
-        ui->waveOutputLine->text(), tr("Wave Files (*.wav *.amb);;All Files (*.*)"))};
+    const auto fname = QFileDialog::getSaveFileName(this, tr("Select Wave File Output"),
+        ui->waveOutputLine->text(), tr("Wave Files (*.wav *.amb);;All Files (*.*)"));
     if(!fname.isEmpty())
     {
         ui->waveOutputLine->setText(fname);

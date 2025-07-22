@@ -33,7 +33,6 @@
 
 #include <algorithm>
 #include <atomic>
-#include <cassert>
 #include <cstdio>
 #include <cstdlib>
 #include <memory.h>
@@ -50,8 +49,9 @@
 #include "core/logging.h"
 #include "dynload.h"
 #include "fmt/core.h"
+#include "gsl/gsl"
 #include "ringbuffer.h"
-#include "strutils.h"
+#include "strutils.hpp"
 
 /* MinGW-w64 needs this for some unknown reason now. */
 using LPCWAVEFORMATEX = const WAVEFORMATEX*;
@@ -282,17 +282,17 @@ FORCE_ALIGN int DSoundPlayback::mixerProc()
 
 void DSoundPlayback::open(std::string_view name)
 {
-    HRESULT hr;
+    auto hr = HRESULT{};
     if(PlaybackDevices.empty())
     {
         /* Initialize COM to prevent name truncation */
-        ComWrapper com{};
+        const auto com = ComWrapper{};
         hr = DirectSoundEnumerateW(DSoundEnumDevices, &PlaybackDevices);
         if(FAILED(hr))
             ERR("Error enumerating DirectSound devices: {:#x}", as_unsigned(hr));
     }
 
-    const GUID *guid{nullptr};
+    auto *guid = LPCGUID{nullptr};
     if(name.empty() && !PlaybackDevices.empty())
     {
         name = PlaybackDevices[0].name;
@@ -300,16 +300,14 @@ void DSoundPlayback::open(std::string_view name)
     }
     else
     {
-        auto iter = std::find_if(PlaybackDevices.cbegin(), PlaybackDevices.cend(),
-            [name](const DevMap &entry) -> bool { return entry.name == name; });
-        if(iter == PlaybackDevices.cend())
+        auto iter = std::ranges::find(PlaybackDevices, name, &DevMap::name);
+        if(iter == PlaybackDevices.end())
         {
-            GUID id{};
+            auto id = GUID{};
             hr = CLSIDFromString(utf8_to_wstr(name).c_str(), &id);
             if(SUCCEEDED(hr))
-                iter = std::find_if(PlaybackDevices.cbegin(), PlaybackDevices.cend(),
-                    [&id](const DevMap &entry) -> bool { return entry.guid == id; });
-            if(iter == PlaybackDevices.cend())
+                iter = std::ranges::find(PlaybackDevices, id, &DevMap::guid);
+            if(iter == PlaybackDevices.end())
                 throw al::backend_exception{al::backend_error::NoDevice,
                     "Device name \"{}\" not found", name};
         }
@@ -324,7 +322,7 @@ void DSoundPlayback::open(std::string_view name)
     }
 
     //DirectSound Init code
-    ComPtr<IDirectSound> ds;
+    auto ds = ComPtr<IDirectSound>{};
     if(SUCCEEDED(hr))
         hr = DirectSoundCreate(guid, al::out_ptr(ds), nullptr);
     if(SUCCEEDED(hr))
@@ -418,10 +416,10 @@ bool DSoundPlayback::reset()
     do {
         hr = S_OK;
         OutputType.Format.wFormatTag = WAVE_FORMAT_PCM;
-        OutputType.Format.nChannels = static_cast<WORD>(mDevice->channelsFromFmt());
-        OutputType.Format.wBitsPerSample = static_cast<WORD>(mDevice->bytesFromFmt() * 8);
-        OutputType.Format.nBlockAlign = static_cast<WORD>(OutputType.Format.nChannels *
-            OutputType.Format.wBitsPerSample / 8);
+        OutputType.Format.nChannels = gsl::narrow_cast<WORD>(mDevice->channelsFromFmt());
+        OutputType.Format.wBitsPerSample = gsl::narrow_cast<WORD>(mDevice->bytesFromFmt() * 8);
+        OutputType.Format.nBlockAlign = gsl::narrow_cast<WORD>(OutputType.Format.nChannels
+            * OutputType.Format.wBitsPerSample / 8);
         OutputType.Format.nSamplesPerSec = mDevice->mSampleRate;
         OutputType.Format.nAvgBytesPerSec = OutputType.Format.nSamplesPerSec *
             OutputType.Format.nBlockAlign;
@@ -480,7 +478,7 @@ bool DSoundPlayback::reset()
         if(SUCCEEDED(hr))
         {
             auto num_updates = mDevice->mBufferSize / mDevice->mUpdateSize;
-            assert(num_updates <= MAX_UPDATES);
+            Expects(num_updates <= MAX_UPDATES);
 
             auto nots = std::array<DSBPOSITIONNOTIFY,MAX_UPDATES>{};
             for(auto i = 0u;i < num_updates;++i)
@@ -536,7 +534,7 @@ struct DSoundCapture final : public BackendBase {
     void open(std::string_view name) override;
     void start() override;
     void stop() override;
-    void captureSamples(std::byte *buffer, uint samples) override;
+    void captureSamples(std::span<std::byte> outbuffer) override;
     auto availableSamples() -> uint override;
 
     ComPtr<IDirectSoundCapture> mDSC;
@@ -544,7 +542,7 @@ struct DSoundCapture final : public BackendBase {
     DWORD mBufferBytes{0u};
     DWORD mCursor{0u};
 
-    RingBuffer2Ptr<std::byte> mRing;
+    RingBufferPtr<std::byte> mRing;
 };
 
 DSoundCapture::~DSoundCapture()
@@ -627,10 +625,10 @@ void DSoundCapture::open(std::string_view name)
     }
 
     InputType.Format.wFormatTag = WAVE_FORMAT_PCM;
-    InputType.Format.nChannels = static_cast<WORD>(mDevice->channelsFromFmt());
-    InputType.Format.wBitsPerSample = static_cast<WORD>(mDevice->bytesFromFmt() * 8);
-    InputType.Format.nBlockAlign = static_cast<WORD>(InputType.Format.nChannels *
-        InputType.Format.wBitsPerSample / 8);
+    InputType.Format.nChannels = gsl::narrow_cast<WORD>(mDevice->channelsFromFmt());
+    InputType.Format.wBitsPerSample = gsl::narrow_cast<WORD>(mDevice->bytesFromFmt() * 8);
+    InputType.Format.nBlockAlign = gsl::narrow_cast<WORD>(InputType.Format.nChannels
+        * InputType.Format.wBitsPerSample / 8);
     InputType.Format.nSamplesPerSec = mDevice->mSampleRate;
     InputType.Format.nAvgBytesPerSec = InputType.Format.nSamplesPerSec *
         InputType.Format.nBlockAlign;
@@ -661,7 +659,7 @@ void DSoundCapture::open(std::string_view name)
     if(SUCCEEDED(hr))
         mDSC->CreateCaptureBuffer(&DSCBDescription, al::out_ptr(mDSCbuffer), nullptr);
     if(SUCCEEDED(hr))
-         mRing = RingBuffer2<std::byte>::Create(mDevice->mBufferSize, InputType.Format.nBlockAlign,
+         mRing = RingBuffer<std::byte>::Create(mDevice->mBufferSize, InputType.Format.nBlockAlign,
             false);
 
     if(FAILED(hr))
@@ -696,8 +694,8 @@ void DSoundCapture::stop()
     }
 }
 
-void DSoundCapture::captureSamples(std::byte *buffer, uint samples)
-{ std::ignore = mRing->read(std::span{buffer, samples*mRing->getElemSize()}); }
+void DSoundCapture::captureSamples(std::span<std::byte> outbuffer)
+{ std::ignore = mRing->read(outbuffer); }
 
 uint DSoundCapture::availableSamples()
 {
@@ -715,7 +713,7 @@ uint DSoundCapture::availableSamples()
         if(SUCCEEDED(hr))
         {
             const auto NumBytes = (BufferBytes+ReadCursor-LastCursor) % BufferBytes;
-            if(!NumBytes) return static_cast<uint>(mRing->readSpace());
+            if(!NumBytes) return gsl::narrow_cast<uint>(mRing->readSpace());
             hr = mDSCbuffer->Lock(LastCursor, NumBytes, &ReadPtr1, &ReadCnt1, &ReadPtr2, &ReadCnt2,
                 0);
         }
@@ -735,7 +733,7 @@ uint DSoundCapture::availableSamples()
         }
     }
 
-    return static_cast<uint>(mRing->readSpace());
+    return gsl::narrow_cast<uint>(mRing->readSpace());
 }
 
 } // namespace
@@ -747,34 +745,45 @@ BackendFactory &DSoundBackendFactory::getFactory()
     return factory;
 }
 
-bool DSoundBackendFactory::init()
+auto DSoundBackendFactory::init() -> bool
 {
 #if HAVE_DYNLOAD
     if(!ds_handle)
     {
-        ds_handle = LoadLib("dsound.dll");
-        if(!ds_handle)
+        if(auto libresult = LoadLib("dsound.dll"))
+            ds_handle = libresult.value();
+        else
         {
-            ERR("Failed to load dsound.dll");
+            WARN("Failed to load dsound.dll: {}", libresult.error());
             return false;
         }
 
-#define LOAD_FUNC(f) do {                                                     \
-    p##f = reinterpret_cast<decltype(p##f)>(GetSymbol(ds_handle, #f));        \
-    if(!p##f)                                                                 \
-    {                                                                         \
-        CloseLib(ds_handle);                                                  \
-        ds_handle = nullptr;                                                  \
-        return false;                                                         \
-    }                                                                         \
-} while(0)
-        /* NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast) */
+        static constexpr auto load_func = [](auto *&func, const char *name) -> bool
+        {
+            using func_t = std::remove_reference_t<decltype(func)>;
+            auto funcresult = GetSymbol(ds_handle, name);
+            if(!funcresult)
+            {
+                WARN("Failed to load function {}: {}", name, funcresult.error());
+                return false;
+            }
+            /* NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) */
+            func = reinterpret_cast<func_t>(funcresult.value());
+            return true;
+        };
+        auto ok = true;
+#define LOAD_FUNC(f) ok &= load_func(p##f, #f)
         LOAD_FUNC(DirectSoundCreate);
         LOAD_FUNC(DirectSoundEnumerateW);
         LOAD_FUNC(DirectSoundCaptureCreate);
         LOAD_FUNC(DirectSoundCaptureEnumerateW);
-        /* NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast) */
 #undef LOAD_FUNC
+        if(!ok)
+        {
+            CloseLib(ds_handle);
+            ds_handle = nullptr;
+            return false;
+        }
     }
 #endif
     return true;
@@ -790,23 +799,24 @@ auto DSoundBackendFactory::enumerate(BackendType type) -> std::vector<std::strin
     { outnames.emplace_back(entry.name); };
 
     /* Initialize COM to prevent name truncation */
-    ComWrapper com{};
+    const auto com = ComWrapper{};
     switch(type)
     {
     case BackendType::Playback:
         PlaybackDevices.clear();
-        if(HRESULT hr{DirectSoundEnumerateW(DSoundEnumDevices, &PlaybackDevices)}; FAILED(hr))
+        if(const auto hr = DirectSoundEnumerateW(DSoundEnumDevices, &PlaybackDevices); FAILED(hr))
             ERR("Error enumerating DirectSound playback devices: {:#x}", as_unsigned(hr));
         outnames.reserve(PlaybackDevices.size());
-        std::for_each(PlaybackDevices.cbegin(), PlaybackDevices.cend(), add_device);
+        std::ranges::for_each(PlaybackDevices, add_device);
         break;
 
     case BackendType::Capture:
         CaptureDevices.clear();
-        if(HRESULT hr{DirectSoundCaptureEnumerateW(DSoundEnumDevices, &CaptureDevices)};FAILED(hr))
+        if(const auto hr = DirectSoundCaptureEnumerateW(DSoundEnumDevices, &CaptureDevices);
+            FAILED(hr))
             ERR("Error enumerating DirectSound capture devices: {:#x}", as_unsigned(hr));
         outnames.reserve(CaptureDevices.size());
-        std::for_each(CaptureDevices.cbegin(), CaptureDevices.cend(), add_device);
+        std::ranges::for_each(CaptureDevices, add_device);
         break;
     }
 

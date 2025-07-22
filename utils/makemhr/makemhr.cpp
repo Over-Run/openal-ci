@@ -66,7 +66,6 @@
 
 #include <algorithm>
 #include <atomic>
-#include <cassert>
 #include <chrono>
 #include <cmath>
 #include <complex>
@@ -80,6 +79,7 @@
 #include <memory>
 #include <numbers>
 #include <numeric>
+#include <ranges>
 #include <span>
 #include <string_view>
 #include <thread>
@@ -91,6 +91,7 @@
 #include "alstring.h"
 #include "filesystem.h"
 #include "fmt/core.h"
+#include "gsl/gsl"
 #include "loaddef.h"
 #include "loadsofa.h"
 
@@ -103,10 +104,7 @@ namespace {
 
 using namespace std::string_view_literals;
 
-struct FileDeleter {
-    void operator()(gsl::owner<FILE*> f) { fclose(f); }
-};
-using FilePtr = std::unique_ptr<FILE,FileDeleter>;
+using FilePtr = std::unique_ptr<FILE, decltype([](const gsl::owner<FILE*> f) { fclose(f); })>;
 
 // The epsilon used to maintain signal stability.
 constexpr double Epsilon{1e-9};
@@ -206,13 +204,13 @@ inline uint dither_rng(uint *seed)
 void TpdfDither(const std::span<double> out, const std::span<const double> in, const double scale,
     const size_t channel, const size_t step, uint *seed)
 {
-    static constexpr double PRNG_SCALE = 1.0 / std::numeric_limits<uint>::max();
-    assert(channel < step);
+    static constexpr auto PRNG_SCALE = 1.0 / std::numeric_limits<uint>::max();
+    Expects(channel < step);
 
     for(size_t i{0};i < in.size();++i)
     {
-        uint prn0{dither_rng(seed)};
-        uint prn1{dither_rng(seed)};
+        const auto prn0 = dither_rng(seed);
+        const auto prn1 = dither_rng(seed);
         out[i*step + channel] = std::round(in[i]*scale + (prn0*PRNG_SCALE - prn1*PRNG_SCALE));
     }
 }
@@ -250,7 +248,7 @@ void LimitMagnitudeResponse(const uint n, const uint m, const double limit,
  */
 void MinimumPhase(const std::span<double> mags, const std::span<complex_d> out)
 {
-    assert(mags.size() == out.size());
+    Expects(mags.size() == out.size());
     const size_t m{(mags.size()/2) + 1};
 
     size_t i;
@@ -276,7 +274,8 @@ void MinimumPhase(const std::span<double> mags, const std::span<complex_d> out)
 // Write an ASCII string to a file.
 auto WriteAscii(const std::string_view out, std::ostream &ostream, const std::string_view filename) -> int
 {
-    if(!ostream.write(out.data(), std::streamsize(out.size())) || ostream.bad())
+    /* NOLINTNEXTLINE(bugprone-suspicious-stringview-data-usage) */
+    if(!ostream.write(out.data(), std::ssize(out)) || ostream.bad())
     {
         fmt::println(stderr, "\nError: Bad write to file '{}'.", filename);
         return 0;
@@ -293,7 +292,7 @@ auto WriteBin4(const uint bytes, const uint32_t in, std::ostream &ostream,
     for(uint i{0};i < bytes;i++)
         out[i] = static_cast<char>((in>>(i*8)) & 0x000000FF);
 
-    if(!ostream.write(out.data(), std::streamsize(bytes)) || ostream.bad())
+    if(!ostream.write(out.data(), gsl::narrow<std::streamsize>(bytes)) || ostream.bad())
     {
         fmt::println(stderr, "\nError: Bad write to file '{}'.", filename);
         return 0;
@@ -533,7 +532,7 @@ void CalculateDiffuseFieldAverage(const HrirDataT *hData, const uint channels, c
                 {
                     HrirAzT *azd = &hData->mFds[fi].mEvs[ei].mAzs[ai];
                     // Get the weight for this HRIR's contribution.
-                    double weight = weights[(fi * MAX_EV_COUNT) + ei];
+                    const auto weight = weights[(fi * MAX_EV_COUNT) + ei];
 
                     // Add this HRIR's weighted power average to the total.
                     for(size_t i{0};i < m;++i)
@@ -633,10 +632,10 @@ void SynthesizeOnsets(HrirDataT *hData)
                     CalcAzIndices(field.mEvs[topElev], az, &a0, &a1, &af);
 
                     /* Blend the delays, and again, swap the ears. */
-                    field.mEvs[ei].mAzs[ai].mDelays[0] = Lerp(
+                    field.mEvs[ei].mAzs[ai].mDelays[0] = std::lerp(
                         field.mEvs[topElev].mAzs[a0].mDelays[1],
                         field.mEvs[topElev].mAzs[a1].mDelays[1], af);
-                    field.mEvs[ei].mAzs[ai].mDelays[1] = Lerp(
+                    field.mEvs[ei].mAzs[ai].mDelays[1] = std::lerp(
                         field.mEvs[topElev].mAzs[a0].mDelays[0],
                         field.mEvs[topElev].mAzs[a1].mDelays[0], af);
                 }
@@ -666,7 +665,7 @@ void SynthesizeOnsets(HrirDataT *hData)
                     else az = (std::numbers::pi*2.0)-az + std::numbers::pi;
                     CalcAzIndices(field.mEvs[topElev], az, &a0, &a1, &af);
 
-                    field.mEvs[ei].mAzs[ai].mDelays[0] = Lerp(
+                    field.mEvs[ei].mAzs[ai].mDelays[0] = std::lerp(
                         field.mEvs[topElev].mAzs[a0].mDelays[0],
                         field.mEvs[topElev].mAzs[a1].mDelays[0], af);
                 }
@@ -692,7 +691,7 @@ void SynthesizeOnsets(HrirDataT *hData)
                 double af0;
                 double af1;
 
-                double az{field.mEvs[ei].mAzs[ai].mAzimuth};
+                const auto az = field.mEvs[ei].mAzs[ai].mAzimuth;
                 CalcAzIndices(field.mEvs[upperElevReal], az, &a0, &a1, &af0);
                 CalcAzIndices(field.mEvs[lowerElevFake], az, &a2, &a3, &af1);
                 std::array<double,4> blend{{
@@ -713,7 +712,7 @@ void SynthesizeOnsets(HrirDataT *hData)
             }
         }
     };
-    std::for_each(hData->mFds.begin(), hData->mFds.end(), proc_field);
+    std::ranges::for_each(hData->mFds, proc_field);
 }
 
 /* Attempt to synthesize any missing HRIRs at the bottom elevations of each
@@ -743,13 +742,13 @@ void SynthesizeHrirs(HrirDataT *hData)
             /* Use the lowest immediate-left response for the left ear and
              * lowest immediate-right response for the right ear. Given no comb
              * effects as a result of the left response reaching the right ear
-             * and vice-versa, this produces a decent phantom-center response
+             * and vice versa, this produces a decent phantom-center response
              * underneath the head.
              */
             CalcAzIndices(field.mEvs[oi], std::numbers::pi/((ti==0) ? -2.0 : 2.0), &a0, &a1, &af);
             for(uint i{0u};i < m;i++)
             {
-                field.mEvs[0].mAzs[0].mIrs[ti][i] = Lerp(field.mEvs[oi].mAzs[a0].mIrs[ti][i],
+                field.mEvs[0].mAzs[0].mIrs[ti][i] = std::lerp(field.mEvs[oi].mAzs[a0].mIrs[ti][i],
                     field.mEvs[oi].mAzs[a1].mIrs[ti][i], af);
             }
         }
@@ -761,24 +760,24 @@ void SynthesizeHrirs(HrirDataT *hData)
             std::array<double,4> lp{};
 
             /* Calculate a low-pass filter to simulate body occlusion. */
-            lp[0] = Lerp(1.0, lp[0], b);
-            lp[1] = Lerp(lp[0], lp[1], b);
-            lp[2] = Lerp(lp[1], lp[2], b);
-            lp[3] = Lerp(lp[2], lp[3], b);
+            lp[0] = std::lerp(1.0, lp[0], b);
+            lp[1] = std::lerp(lp[0], lp[1], b);
+            lp[2] = std::lerp(lp[1], lp[2], b);
+            lp[3] = std::lerp(lp[2], lp[3], b);
             htemp[0] = lp[3];
             for(size_t i{1u};i < htemp.size();i++)
             {
-                lp[0] = Lerp(0.0, lp[0], b);
-                lp[1] = Lerp(lp[0], lp[1], b);
-                lp[2] = Lerp(lp[1], lp[2], b);
-                lp[3] = Lerp(lp[2], lp[3], b);
+                lp[0] = std::lerp(0.0, lp[0], b);
+                lp[1] = std::lerp(lp[0], lp[1], b);
+                lp[2] = std::lerp(lp[1], lp[2], b);
+                lp[3] = std::lerp(lp[2], lp[3], b);
                 htemp[i] = lp[3];
             }
             /* Get the filter's frequency-domain response and extract the
              * frequency magnitudes (phase will be reconstructed later)).
              */
             FftForward(static_cast<uint>(htemp.size()), htemp.data());
-            std::transform(htemp.cbegin(), htemp.cbegin()+m, filter.begin(),
+            std::ranges::transform(htemp | std::views::take(m), filter.begin(),
                 [](const complex_d c) -> double { return std::abs(c); });
 
             for(uint ai{0u};ai < field.mEvs[ei].mAzs.size();ai++)
@@ -795,9 +794,9 @@ void SynthesizeHrirs(HrirDataT *hData)
                         /* Blend the two defined HRIRs closest to this azimuth,
                          * then blend that with the synthesized -90 elevation.
                          */
-                        const double s1{Lerp(field.mEvs[oi].mAzs[a0].mIrs[ti][i],
-                            field.mEvs[oi].mAzs[a1].mIrs[ti][i], af)};
-                        const double s{Lerp(field.mEvs[0].mAzs[0].mIrs[ti][i], s1, of)};
+                        const auto s1 = std::lerp(field.mEvs[oi].mAzs[a0].mIrs[ti][i],
+                            field.mEvs[oi].mAzs[a1].mIrs[ti][i], af);
+                        const auto s = std::lerp(field.mEvs[0].mAzs[0].mIrs[ti][i], s1, of);
                         field.mEvs[ei].mAzs[ai].mIrs[ti][i] = s * filter[i];
                     }
                 }
@@ -805,21 +804,21 @@ void SynthesizeHrirs(HrirDataT *hData)
         }
         const double b{beta};
         std::array<double,4> lp{};
-        lp[0] = Lerp(1.0, lp[0], b);
-        lp[1] = Lerp(lp[0], lp[1], b);
-        lp[2] = Lerp(lp[1], lp[2], b);
-        lp[3] = Lerp(lp[2], lp[3], b);
+        lp[0] = std::lerp(1.0, lp[0], b);
+        lp[1] = std::lerp(lp[0], lp[1], b);
+        lp[2] = std::lerp(lp[1], lp[2], b);
+        lp[3] = std::lerp(lp[2], lp[3], b);
         htemp[0] = lp[3];
         for(size_t i{1u};i < htemp.size();i++)
         {
-            lp[0] = Lerp(0.0, lp[0], b);
-            lp[1] = Lerp(lp[0], lp[1], b);
-            lp[2] = Lerp(lp[1], lp[2], b);
-            lp[3] = Lerp(lp[2], lp[3], b);
+            lp[0] = std::lerp(0.0, lp[0], b);
+            lp[1] = std::lerp(lp[0], lp[1], b);
+            lp[2] = std::lerp(lp[1], lp[2], b);
+            lp[3] = std::lerp(lp[2], lp[3], b);
             htemp[i] = lp[3];
         }
         FftForward(static_cast<uint>(htemp.size()), htemp.data());
-        std::transform(htemp.cbegin(), htemp.cbegin()+m, filter.begin(),
+        std::ranges::transform(htemp | std::views::take(m), filter.begin(),
             [](const complex_d c) -> double { return std::abs(c); });
 
         for(uint ti{0u};ti < channels;ti++)
@@ -828,7 +827,7 @@ void SynthesizeHrirs(HrirDataT *hData)
                 field.mEvs[0].mAzs[0].mIrs[ti][i] *= filter[i];
         }
     };
-    std::for_each(hData->mFds.begin(), hData->mFds.end(), proc_field);
+    std::ranges::for_each(hData->mFds, proc_field);
 }
 
 // The following routines assume a full set of HRIRs for all elevations.
@@ -848,7 +847,7 @@ struct HrirReconstructor {
     {
         auto h = std::vector<complex_d>(mFftSize);
         auto mags = std::vector<double>(mFftSize);
-        size_t m{(mFftSize/2) + 1};
+        const auto m = (mFftSize/2_uz) + 1_uz;
 
         while(true)
         {
@@ -980,17 +979,17 @@ void NormalizeHrirs(HrirDataT *hData)
     /* Now scale all IRs by the given factor. */
     auto proc_channel = [irSize,factor](std::span<double> ir)
     {
-        ir = ir.first(irSize);
-        std::transform(ir.begin(), ir.end(), ir.begin(), [factor](double s) { return s*factor; });
+        std::ranges::transform(ir.first(irSize), ir.begin(),
+            [factor](const double s) noexcept { return s*factor; });
     };
     auto proc_azi = [channels,proc_channel](HrirAzT &azi)
-    { std::for_each(azi.mIrs.begin(), azi.mIrs.begin()+channels, proc_channel); };
+    { std::ranges::for_each(azi.mIrs | std::views::take(channels), proc_channel); };
     auto proc_elev = [proc_azi](HrirEvT &elev)
-    { std::for_each(elev.mAzs.begin(), elev.mAzs.end(), proc_azi); };
+    { std::ranges::for_each(elev.mAzs, proc_azi); };
     auto proc1_field = [proc_elev](HrirFdT &field)
-    { std::for_each(field.mEvs.begin(), field.mEvs.end(), proc_elev); };
+    { std::ranges::for_each(field.mEvs, proc_elev); };
 
-    std::for_each(hData->mFds.begin(), hData->mFds.end(), proc1_field);
+    std::ranges::for_each(hData->mFds, proc1_field);
 }
 
 // Calculate the left-ear time delay using a spherical head model.
@@ -1009,8 +1008,8 @@ double CalcLTD(const double ev, const double az, const double rad, const double 
 // HRIR. This is done per-field since distance delay is ignored.
 void CalculateHrtds(const HeadModelT model, const double radius, HrirDataT *hData)
 {
-    uint channels = (hData->mChannelType == CT_STEREO) ? 2 : 1;
-    double customRatio{radius / hData->mRadius};
+    const auto channels = (hData->mChannelType == CT_STEREO) ? 2u : 1u;
+    const auto customRatio = radius / hData->mRadius;
     uint ti;
 
     if(model == HM_Sphere)
@@ -1118,7 +1117,7 @@ bool PrepareHrirData(const std::span<const double> distances,
         evTotal += evCounts[fi];
         for(uint ei{0};ei < evCounts[fi];++ei)
         {
-            uint azCount = azCounts[fi][ei];
+            const auto azCount = azCounts[fi][ei];
 
             hData->mFds[fi].mEvs[ei].mElevation = -std::numbers::pi / 2.0 + std::numbers::pi * ei
                 / (evCounts[fi] - 1);
@@ -1196,8 +1195,8 @@ bool ProcessDefinition(std::string_view inName, const uint outRate, const Channe
 
     if(equalize)
     {
-        uint c{(hData.mChannelType == CT_STEREO) ? 2u : 1u};
-        uint m{hData.mFftSize/2u + 1u};
+        const auto c = (hData.mChannelType == CT_STEREO) ? 2u : 1u;
+        const auto m = hData.mFftSize/2u + 1u;
         auto dfa = std::vector<double>(size_t{c} * m);
 
         if(hData.mFds.size() > 1)
@@ -1213,9 +1212,7 @@ bool ProcessDefinition(std::string_view inName, const uint outRate, const Channe
     if(hData.mFds.size() > 1)
     {
         fmt::println("Sorting {} fields...", hData.mFds.size());
-        std::sort(hData.mFds.begin(), hData.mFds.end(),
-            [](const HrirFdT &lhs, const HrirFdT &rhs) noexcept
-            { return lhs.mDistance < rhs.mDistance; });
+        std::ranges::sort(hData.mFds, std::less{}, &HrirFdT::mDistance);
         if(farfield)
         {
             fmt::println("Clearing {} near field{}...", hData.mFds.size()-1,
@@ -1268,7 +1265,7 @@ void PrintHelp(const std::string_view argv0, FILE *ofile)
 }
 
 // Standard command line dispatch.
-int main(std::span<std::string_view> args)
+auto main(std::span<std::string_view> args) -> int
 {
     if(args.size() < 2)
     {
@@ -1277,25 +1274,25 @@ int main(std::span<std::string_view> args)
         exit(EXIT_SUCCESS);
     }
 
-    std::string_view outName{"./oalsoft_hrtf_%r.mhr"sv};
-    uint outRate{0};
-    ChannelModeT chanMode{CM_AllowStereo};
-    uint fftSize{DefaultFftSize};
-    bool equalize{DefaultEqualize};
-    bool surface{DefaultSurface};
-    double limit{DefaultLimit};
-    uint numThreads{2};
-    uint truncSize{DefaultTruncSize};
-    HeadModelT model{HM_Default};
-    double radius{DefaultCustomRadius};
-    bool farfield{false};
-    std::string_view inName;
+    auto outName = "./oalsoft_hrtf_%r.mhr"sv;
+    auto outRate = 0u;
+    auto chanMode = CM_AllowStereo;
+    auto fftSize = DefaultFftSize;
+    auto equalize = DefaultEqualize;
+    auto surface = DefaultSurface;
+    auto limit = DefaultLimit;
+    auto numThreads = 2u;
+    auto truncSize = DefaultTruncSize;
+    auto model = HM_Default;
+    auto radius = DefaultCustomRadius;
+    auto farfield = false;
+    auto inName = std::string_view{};
 
-    const std::string_view optlist{"r:maj:f:e:s:l:w:d:c:e:i:o:h"sv};
+    constexpr auto optlist = "r:maj:f:e:s:l:w:d:c:e:i:o:h"sv;
     const auto arg0 = args[0];
     args = args.subspan(1);
-    std::string_view optarg;
-    size_t argplace{0};
+    auto optarg = std::string_view{};
+    auto argplace = 0_uz;
 
     auto getarg = [&args,&argplace,&optarg,optlist]
     {
@@ -1320,14 +1317,14 @@ int main(std::span<std::string_view> args)
             ++argplace;
         }
 
-        const char nextopt{args[0][argplace]};
+        const auto nextopt = args[0][argplace];
         const auto listidx = optlist.find(nextopt);
         if(listidx >= optlist.size())
         {
             fmt::println(stderr, "Unknown argument: -{:c}", nextopt);
             return -1;
         }
-        const bool needsarg{listidx+1 < optlist.size() && optlist[listidx+1] == ':'};
+        const auto needsarg = listidx+1 < optlist.size() && optlist[listidx+1] == ':';
         if(needsarg && (argplace+1 < args[0].size() || args.size() < 2))
         {
             fmt::println(stderr, "Missing parameter for argument: -{:c}", nextopt);
@@ -1346,7 +1343,7 @@ int main(std::span<std::string_view> args)
 
     while(auto opt = getarg())
     {
-        std::size_t endpos{};
+        auto endpos = std::size_t{};
         switch(opt)
         {
         case 'r':
@@ -1491,8 +1488,8 @@ int main(std::span<std::string_view> args)
         }
     }
 
-    const int ret{ProcessDefinition(inName, outRate, chanMode, farfield, numThreads, fftSize,
-        equalize, surface, limit, truncSize, model, radius, outName)};
+    const auto ret = ProcessDefinition(inName, outRate, chanMode, farfield, numThreads, fftSize,
+        equalize, surface, limit, truncSize, model, radius, outName);
     if(!ret) return -1;
     fmt::println("Operation completed.");
 
@@ -1501,10 +1498,9 @@ int main(std::span<std::string_view> args)
 
 } /* namespace */
 
-int main(int argc, char **argv)
+auto main(int argc, char **argv) -> int
 {
-    assert(argc >= 0);
-    auto args = std::vector<std::string_view>(static_cast<unsigned int>(argc));
+    auto args = std::vector<std::string_view>(gsl::narrow<unsigned int>(argc));
     std::copy_n(argv, args.size(), args.begin());
     return main(std::span{args});
 }

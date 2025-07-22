@@ -16,14 +16,14 @@
 
 namespace {
 
-constexpr EffectProps genDefaultProps() noexcept
+consteval auto genDefaultProps() noexcept -> EffectProps
 {
     return std::monostate{};
 }
 
 } // namespace
 
-const EffectProps NullEffectProps{genDefaultProps()};
+constinit const EffectProps NullEffectProps(genDefaultProps());
 
 void NullEffectHandler::SetParami(ALCcontext *context, std::monostate& /*props*/, ALenum param, int /*val*/)
 {
@@ -71,18 +71,15 @@ using NullCommitter = EaxCommitter<EaxNullCommitter>;
 
 } // namespace
 
-template<>
-struct NullCommitter::Exception : public EaxException
-{
-    explicit Exception(const char *message) : EaxException{"EAX_NULL_EFFECT", message}
+template<> /* NOLINTNEXTLINE(clazy-copyable-polymorphic) Exceptions must be copyable. */
+struct NullCommitter::Exception : public EaxException {
+    explicit Exception(const std::string_view message) : EaxException{"EAX_NULL_EFFECT", message}
     { }
 };
 
-template<>
-[[noreturn]] void NullCommitter::fail(const char *message)
-{
-    throw Exception{message};
-}
+template<> [[noreturn]]
+void NullCommitter::fail(const std::string_view message)
+{ throw Exception{message}; }
 
 bool EaxNullCommitter::commit(const std::monostate &props)
 {

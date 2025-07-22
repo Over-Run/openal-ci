@@ -14,7 +14,7 @@
 #include <utility>
 
 #include "alstring.h"
-#include "strutils.h"
+#include "strutils.hpp"
 
 
 #if defined(_WIN32)
@@ -24,13 +24,11 @@
 #endif
 
 
-FILE *gLogFile{stderr};
 #ifdef _DEBUG
 LogLevel gLogLevel{LogLevel::Warning};
 #else
 LogLevel gLogLevel{LogLevel::Error};
 #endif
-
 
 namespace {
 
@@ -42,13 +40,13 @@ enum class LogState : uint8_t {
     Disable
 };
 
-std::mutex LogCallbackMutex;
-LogState gLogState{LogState::FirstRun};
+auto LogCallbackMutex = std::mutex{};
+auto gLogState = LogState::FirstRun;
 
-LogCallbackFunc gLogCallback{};
+auto gLogCallback = LogCallbackFunc{};
 void *gLogCallbackPtr{};
 
-constexpr auto GetLevelCode(LogLevel level) noexcept -> std::optional<char>
+constexpr auto GetLevelCode(const LogLevel level) noexcept -> std::optional<char>
 {
     switch(level)
     {
@@ -92,7 +90,7 @@ void al_print_impl(LogLevel level, const fmt::string_view fmt, fmt::format_args 
 
     if(gLogLevel >= level)
     {
-        auto logfile = gLogFile;
+        auto *logfile = gLogFile ? gLogFile : stderr;
         fmt::println(logfile, "{}{}", prefix, msg);
         fflush(logfile);
     }

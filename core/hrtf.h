@@ -16,10 +16,9 @@
 #include "flexarray.h"
 #include "intrusive_ptr.h"
 #include "mixer/hrtfdefs.h"
-#include "opthelpers.h"
 
 
-struct SIMDALIGN HrtfStore {
+struct HrtfStore {
     alignas(16) std::atomic<uint> mRef;
 
     uint mSampleRate : 24;
@@ -59,6 +58,20 @@ struct SIMDALIGN HrtfStore {
 };
 using HrtfStorePtr = al::intrusive_ptr<HrtfStore>;
 
+/* Data set limits must be the same as or more flexible than those defined in
+ * the makemhr utility.
+ */
+constexpr inline auto MaxHrirDelay = uint{HrtfHistoryLength} - 1u;
+
+constexpr inline auto HrirDelayFracBits = 2u;
+constexpr inline auto HrirDelayFracOne = 1u << HrirDelayFracBits;
+constexpr inline auto HrirDelayFracHalf = HrirDelayFracOne >> 1u;
+
+/* The sample rate is stored as a 24-bit integer, so 16MHz is the largest
+ * supported.
+ */
+constexpr inline auto MaxHrtfSampleRate = 0xff'ff'ffu;
+
 
 struct EvRadians { float value; };
 struct AzRadians { float value; };
@@ -68,14 +81,16 @@ struct AngularPoint {
 };
 
 
-struct DirectHrtfState {
+class DirectHrtfState {
+    explicit DirectHrtfState(size_t numchans) : mChannels{numchans} { }
+
+public:
     std::array<float,BufferLineSize> mTemp{};
 
     /* HRTF filter state for dry buffer content */
     uint mIrSize{0u};
     al::FlexArray<HrtfChannelState> mChannels;
 
-    explicit DirectHrtfState(size_t numchans) : mChannels{numchans} { }
     /**
      * Produces HRTF filter coefficients for decoding B-Format, given a set of
      * virtual speaker positions, a matching decoding matrix, and per-order

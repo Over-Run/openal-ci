@@ -48,12 +48,12 @@
 #include <algorithm>
 #include <atomic>
 #include <bit>
-#include <cassert>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
 #include <functional>
 #include <future>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -72,8 +72,9 @@
 #include "core/logging.h"
 #include "fmt/core.h"
 #include "fmt/chrono.h"
+#include "gsl/gsl"
 #include "ringbuffer.h"
-#include "strutils.h"
+#include "strutils.hpp"
 
 #if ALSOFT_UWP
 #include <winrt/Windows.Media.Core.h> // !!This is important!!
@@ -202,7 +203,8 @@ using unique_coptr = std::unique_ptr<T,CoTaskMemDeleter<T>>;
 constexpr auto RefTime2Samples(const ReferenceTime &val, DWORD srate) noexcept -> uint
 {
     const auto retval = (val*srate + ReferenceTime{seconds{1}}/2) / seconds{1};
-    return static_cast<uint>(std::min<decltype(retval)>(retval, std::numeric_limits<uint>::max()));
+    return gsl::narrow_cast<uint>(std::min<decltype(retval)>(retval,
+        std::numeric_limits<uint>::max()));
 }
 
 
@@ -247,13 +249,13 @@ public:
     {
         if constexpr(std::is_same_v<T,uint>)
         {
-            assert(mProp.vt == VT_UI4 || mProp.vt == VT_UINT);
+            Expects(mProp.vt == VT_UI4 || mProp.vt == VT_UINT);
             return mProp.uintVal;
         }
         else if constexpr(std::is_same_v<T,std::wstring_view> || std::is_same_v<T,std::wstring>
             || std::is_same_v<T,LPWSTR> || std::is_same_v<T,LPCWSTR>)
         {
-            assert(mProp.vt == VT_LPWSTR);
+            Expects(mProp.vt == VT_LPWSTR);
             return mProp.pwszVal;
         }
     }
@@ -261,9 +263,9 @@ public:
     void setBlob(const std::span<std::byte> data)
     {
         if constexpr(sizeof(size_t) > sizeof(ULONG))
-            assert(data.size() <= std::numeric_limits<ULONG>::max());
+            Expects(data.size() <= std::numeric_limits<ULONG>::max());
         mProp.vt = VT_BLOB;
-        mProp.blob.cbSize = static_cast<ULONG>(data.size());
+        mProp.blob.cbSize = gsl::narrow_cast<ULONG>(data.size());
         /* NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) */
         mProp.blob.pBlobData = reinterpret_cast<BYTE*>(data.data());
     }
@@ -381,9 +383,9 @@ auto GetDeviceNameAndGuid(const DeviceHandle &device) -> NameGUIDPair
         if(auto devIdStartEnd = wcschr(devIdStart, L'#'))
         {
             ret.mGuid = wstr_to_utf8(std::wstring_view{devIdStart,
-                static_cast<size_t>(devIdStartEnd - devIdStart)});
+                gsl::narrow_cast<size_t>(devIdStartEnd - devIdStart)});
             std::transform(ret.mGuid.begin(), ret.mGuid.end(), ret.mGuid.begin(),
-                [](char ch) { return static_cast<char>(std::toupper(ch)); });
+                [](char ch) { return gsl::narrow_cast<char>(std::toupper(ch)); });
         }
     }
 #endif
@@ -589,11 +591,11 @@ struct DeviceEnumHelper final : private IMMNotificationClient {
 #endif
 
     /** ------------------------ DeviceEnumHelper -------------------------- */
-    HRESULT init()
+    auto init() -> HRESULT
     {
 #if !ALSOFT_UWP
-        HRESULT hr{CoCreateInstance(CLSID_MMDeviceEnumerator, nullptr, CLSCTX_INPROC_SERVER,
-            __uuidof(IMMDeviceEnumerator), al::out_ptr(mEnumerator))};
+        const auto hr = CoCreateInstance(CLSID_MMDeviceEnumerator, nullptr, CLSCTX_INPROC_SERVER,
+            __uuidof(IMMDeviceEnumerator), al::out_ptr(mEnumerator));
         if(SUCCEEDED(hr))
             mEnumerator->RegisterEndpointNotificationCallback(this);
         else
@@ -766,14 +768,13 @@ private:
             auto devtype = (flowdir==eRender)?alc::DeviceType::Playback : alc::DeviceType::Capture;
 
             /* Find the ID in the list to remove. */
-            auto iter = std::find_if(list.begin(), list.end(),
-                [deviceId](const DevMap &entry) noexcept { return deviceId == entry.devid; });
+            auto iter = std::ranges::find(list, deviceId, &DevMap::devid);
             if(iter == list.end()) continue;
 
             TRACE("Removing device \"{}\", \"{}\", \"{}\"", iter->name, iter->endpoint_guid,
                 wstr_to_utf8(iter->devid));
 
-            std::string msg{"Device removed: "+std::move(iter->name)};
+            const auto msg = "Device removed: "+std::move(iter->name);
             list.erase(iter);
 
             alc::Event(alc::EventType::DeviceRemoved, devtype, msg);
@@ -812,7 +813,7 @@ void DeviceEnumHelper::messageHandler(std::promise<HRESULT> *promise)
 {
     TRACE("Starting watcher thread");
 
-    ComWrapper com{COINIT_MULTITHREADED};
+    const auto com = ComWrapper{COINIT_MULTITHREADED};
     if(!com)
     {
         WARN("Failed to initialize COM: {:#x}", as_unsigned(com.status()));
@@ -976,8 +977,8 @@ struct DeviceHelper {
     [[nodiscard]]
     auto init() -> HRESULT
     {
-        HRESULT hr{CoCreateInstance(CLSID_MMDeviceEnumerator, nullptr, CLSCTX_INPROC_SERVER,
-            __uuidof(IMMDeviceEnumerator), al::out_ptr(mEnumerator))};
+        const auto hr = CoCreateInstance(CLSID_MMDeviceEnumerator, nullptr, CLSCTX_INPROC_SERVER,
+            __uuidof(IMMDeviceEnumerator), al::out_ptr(mEnumerator));
         if(FAILED(hr))
             WARN("Failed to create IMMDeviceEnumerator instance: {:#x}", as_unsigned(hr));
         return hr;
@@ -987,7 +988,7 @@ struct DeviceHelper {
     auto openDevice(const std::wstring &devid, EDataFlow flow, DeviceHandle &device) const
         -> HRESULT
     {
-        HRESULT hr{E_FAIL};
+        auto hr = E_FAIL;
         if(mEnumerator)
         {
             if(devid.empty())
@@ -1277,7 +1278,7 @@ FORCE_ALIGN void WasapiPlayback::mixerProc(PlainDevice &audio)
     const auto buffer_len = mOutBufferSize;
     auto *resbufferptr = LPCVOID{};
 
-    assert(buffer_len > 0);
+    Expects(buffer_len > 0);
 
 #ifdef AVRTAPI
     /* TODO: "Audio" or "Pro Audio"? The suggestion is to use "Pro Audio" for
@@ -1447,7 +1448,7 @@ FORCE_ALIGN void WasapiPlayback::mixerProc(SpatialDevice &audio)
                     for(size_t i{0};i < tmpbuffers.size();++i)
                     {
                         resbuffers[i] = std::to_address(bufptr);
-                        bufptr += ptrdiff_t(mDevice->mUpdateSize*sizeof(float));
+                        std::advance(bufptr, mDevice->mUpdateSize*sizeof(float));
                     }
                 }
             }
@@ -1883,7 +1884,7 @@ auto WasapiPlayback::initSpatial(DeviceHelper &helper, DeviceHandle &mmdev, Spat
     {
         OutputType.Format.nAvgBytesPerSec = OutputType.Format.nAvgBytesPerSec * 32u
             / OutputType.Format.wBitsPerSample;
-        OutputType.Format.nBlockAlign = static_cast<WORD>(OutputType.Format.nBlockAlign * 32
+        OutputType.Format.nBlockAlign = gsl::narrow_cast<WORD>(OutputType.Format.nBlockAlign * 32
             / OutputType.Format.wBitsPerSample);
         OutputType.Format.wBitsPerSample = 32;
     }
@@ -1956,7 +1957,7 @@ auto WasapiPlayback::initSpatial(DeviceHelper &helper, DeviceHandle &mmdev, Spat
     mOutUpdateSize = maxFrames;
     mOutBufferSize = mOutUpdateSize*2;
 
-    mDevice->mUpdateSize = static_cast<uint>((uint64_t{mOutUpdateSize}*mDevice->mSampleRate
+    mDevice->mUpdateSize = gsl::narrow_cast<uint>((uint64_t{mOutUpdateSize}*mDevice->mSampleRate
         + (mFormat.Format.nSamplesPerSec-1)) / mFormat.Format.nSamplesPerSec);
     mDevice->mBufferSize = mDevice->mUpdateSize*2;
 
@@ -2153,7 +2154,7 @@ auto WasapiPlayback::resetProxy(DeviceHelper &helper, DeviceHandle &mmdev,
     /* NOLINTNEXTLINE(cppcoreguidelines-pro-type-union-access) */
     OutputType.Samples.wValidBitsPerSample = OutputType.Format.wBitsPerSample;
     OutputType.Format.nSamplesPerSec = mDevice->mSampleRate;
-    OutputType.Format.nBlockAlign = static_cast<WORD>(OutputType.Format.nChannels
+    OutputType.Format.nBlockAlign = gsl::narrow_cast<WORD>(OutputType.Format.nChannels
         * OutputType.Format.wBitsPerSample / 8);
     OutputType.Format.nAvgBytesPerSec = OutputType.Format.nSamplesPerSec
         * OutputType.Format.nBlockAlign;
@@ -2181,7 +2182,7 @@ auto WasapiPlayback::resetProxy(DeviceHelper &helper, DeviceHandle &mmdev,
                 OutputType.SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
                 /* NOLINTNEXTLINE(cppcoreguidelines-pro-type-union-access) */
                 OutputType.Samples.wValidBitsPerSample = OutputType.Format.wBitsPerSample;
-                OutputType.Format.nBlockAlign = static_cast<WORD>(OutputType.Format.nChannels
+                OutputType.Format.nBlockAlign = gsl::narrow_cast<WORD>(OutputType.Format.nChannels
                     * OutputType.Format.wBitsPerSample / 8);
                 OutputType.Format.nAvgBytesPerSec = OutputType.Format.nSamplesPerSec
                     * OutputType.Format.nBlockAlign;
@@ -2304,7 +2305,7 @@ auto WasapiPlayback::resetProxy(DeviceHelper &helper, DeviceHandle &mmdev,
          * implicitly two update periods on the device.
          */
         mOutUpdateSize = buffer_len;
-        mDevice->mUpdateSize = static_cast<uint>(uint64_t{buffer_len} * mDevice->mSampleRate /
+        mDevice->mUpdateSize = gsl::narrow_cast<uint>(uint64_t{buffer_len} * mDevice->mSampleRate /
             mFormat.Format.nSamplesPerSec);
         mDevice->mBufferSize = mDevice->mUpdateSize * 2;
     }
@@ -2312,7 +2313,7 @@ auto WasapiPlayback::resetProxy(DeviceHelper &helper, DeviceHandle &mmdev,
     {
         mOutUpdateSize = RefTime2Samples(period_time, mFormat.Format.nSamplesPerSec);
 
-        mDevice->mBufferSize = static_cast<uint>(uint64_t{buffer_len} * mDevice->mSampleRate /
+        mDevice->mBufferSize = gsl::narrow_cast<uint>(uint64_t{buffer_len} * mDevice->mSampleRate /
             mFormat.Format.nSamplesPerSec);
         mDevice->mUpdateSize = std::min(RefTime2Samples(period_time, mDevice->mSampleRate),
             mDevice->mBufferSize/2u);
@@ -2401,7 +2402,7 @@ struct WasapiCapture final : public BackendBase {
     void open(std::string_view name) override;
     void start() override;
     void stop() override;
-    void captureSamples(std::byte *buffer, uint samples) override;
+    void captureSamples(std::span<std::byte> outbuffer) override;
     auto availableSamples() -> uint override;
 
 
@@ -2430,7 +2431,7 @@ struct WasapiCapture final : public BackendBase {
 
     ChannelConverter mChannelConv{};
     SampleConverterPtr mSampleConv;
-    RingBuffer2Ptr<std::byte> mRing;
+    RingBufferPtr<std::byte> mRing;
 
     std::atomic<bool> mKillNow{true};
     std::thread mThread;
@@ -2502,7 +2503,7 @@ FORCE_ALIGN void WasapiCapture::recordProc(IAudioClient *client, IAudioCaptureCl
 
                     const auto len1 = data[0].size() / mRing->getElemSize();
                     dstframes = mSampleConv->convert(&srcdata, &srcframes, data[0].data(),
-                        static_cast<uint>(std::min(len1, lenlimit)));
+                        gsl::narrow_cast<uint>(std::min(len1, lenlimit)));
                     if(srcframes > 0 && dstframes == len1 && !data[1].empty())
                     {
                         /* If some source samples remain, all of the first dest
@@ -2511,7 +2512,7 @@ FORCE_ALIGN void WasapiCapture::recordProc(IAudioClient *client, IAudioCaptureCl
                          */
                         const auto len2 = data[1].size() / mRing->getElemSize();
                         dstframes += mSampleConv->convert(&srcdata, &srcframes, data[1].data(),
-                            static_cast<uint>(std::min(len2, lenlimit)));
+                            gsl::narrow_cast<uint>(std::min(len2, lenlimit)));
                     }
                 }
                 else
@@ -2816,7 +2817,7 @@ auto WasapiCapture::resetProxy(DeviceHelper &helper, DeviceHandle &mmdev,
     InputType.Samples.wValidBitsPerSample = InputType.Format.wBitsPerSample;
     InputType.Format.nSamplesPerSec = mDevice->mSampleRate;
 
-    InputType.Format.nBlockAlign = static_cast<WORD>(InputType.Format.nChannels *
+    InputType.Format.nBlockAlign = gsl::narrow_cast<WORD>(InputType.Format.nChannels *
         InputType.Format.wBitsPerSample / 8);
     InputType.Format.nAvgBytesPerSec = InputType.Format.nSamplesPerSec *
         InputType.Format.nBlockAlign;
@@ -2995,7 +2996,7 @@ auto WasapiCapture::resetProxy(DeviceHelper &helper, DeviceHandle &mmdev,
     mDevice->mUpdateSize = RefTime2Samples(min_per, mDevice->mSampleRate);
     mDevice->mBufferSize = buffer_len;
 
-    mRing = RingBuffer2<std::byte>::Create(buffer_len, mDevice->frameSizeFromFmt(), false);
+    mRing = RingBuffer<std::byte>::Create(buffer_len, mDevice->frameSizeFromFmt(), false);
 
     hr = client->SetEventHandle(mNotifyEvent);
     if(FAILED(hr))
@@ -3035,11 +3036,11 @@ void WasapiCapture::stop()
 }
 
 
-void WasapiCapture::captureSamples(std::byte *buffer, uint samples)
-{ std::ignore = mRing->read(std::span{buffer, samples*mRing->getElemSize()}); }
+void WasapiCapture::captureSamples(std::span<std::byte> outbuffer)
+{ std::ignore = mRing->read(outbuffer); }
 
 auto WasapiCapture::availableSamples() -> uint
-{ return static_cast<uint>(mRing->readSpace()); }
+{ return gsl::narrow_cast<uint>(mRing->readSpace()); }
 
 } // namespace
 

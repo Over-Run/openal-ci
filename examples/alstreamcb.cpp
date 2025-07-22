@@ -27,7 +27,6 @@
 
 #include <algorithm>
 #include <atomic>
-#include <cassert>
 #include <chrono>
 #include <cstddef>
 #include <cstdlib>
@@ -52,6 +51,7 @@
 
 #include "alnumeric.h"
 #include "common/alhelpers.h"
+#include "common/alhelpers.hpp"
 #include "fmt/core.h"
 
 #include "win_main_utf8.h"
@@ -518,18 +518,9 @@ auto main(std::span<std::string_view> args) -> int
         fmt::println(stderr, "Usage: {} [-device <name>] <filenames...>", args[0]);
         return 1;
     }
-    args = args.subspan(1);
 
-    if(InitAL(args) != 0)
-        throw std::runtime_error{"Failed to initialize OpenAL"};
-    /* A simple RAII container for automating OpenAL shutdown. */
-    struct AudioManager {
-        AudioManager() = default;
-        AudioManager(const AudioManager&) = delete;
-        auto operator=(const AudioManager&) -> AudioManager& = delete;
-        ~AudioManager() { CloseAL(); }
-    };
-    auto almgr = AudioManager{};
+    args = args.subspan(1);
+    auto almgr = InitAL(args);
 
     if(!alIsExtensionPresent("AL_SOFT_callback_buffer"))
     {
@@ -582,8 +573,7 @@ auto main(std::span<std::string_view> args) -> int
 
 auto main(int argc, char **argv) -> int
 {
-    assert(argc >= 0);
-    auto args = std::vector<std::string_view>(static_cast<unsigned int>(argc));
+    auto args = std::vector<std::string_view>(gsl::narrow<unsigned int>(argc));
     std::ranges::copy(std::views::counted(argv, argc), args.begin());
     return main(std::span{args});
 }

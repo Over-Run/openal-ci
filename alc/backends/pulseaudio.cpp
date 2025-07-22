@@ -51,8 +51,9 @@
 #include "core/logging.h"
 #include "dynload.h"
 #include "fmt/core.h"
+#include "gsl/gsl"
 #include "opthelpers.h"
-#include "strutils.h"
+#include "strutils.hpp"
 
 #include <pulse/pulseaudio.h>
 
@@ -249,22 +250,22 @@ constexpr auto X714ChanMap = pa_channel_map{12, {
 
 /* NOLINTBEGIN(*EnumCastOutOfRange) *grumble* Don't use enums for bitflags. */
 constexpr auto operator|(pa_stream_flags_t lhs, pa_stream_flags_t rhs) -> pa_stream_flags_t
-{ return pa_stream_flags_t(lhs | al::to_underlying(rhs)); }
+{ return gsl::narrow_cast<pa_stream_flags_t>(lhs | al::to_underlying(rhs)); }
 constexpr auto operator|=(pa_stream_flags_t &lhs, pa_stream_flags_t rhs) -> pa_stream_flags_t&
 {
     lhs = lhs | rhs;
     return lhs;
 }
 constexpr auto operator~(pa_stream_flags_t flag) -> pa_stream_flags_t
-{ return pa_stream_flags_t(~al::to_underlying(flag)); }
+{ return gsl::narrow_cast<pa_stream_flags_t>(~al::to_underlying(flag)); }
 constexpr auto operator&=(pa_stream_flags_t &lhs, pa_stream_flags_t rhs) -> pa_stream_flags_t&
 {
-    lhs = pa_stream_flags_t(al::to_underlying(lhs) & rhs);
+    lhs = gsl::narrow_cast<pa_stream_flags_t>(al::to_underlying(lhs) & rhs);
     return lhs;
 }
 
 constexpr auto operator|(pa_context_flags_t lhs, pa_context_flags_t rhs) -> pa_context_flags_t
-{ return pa_context_flags_t(lhs | al::to_underlying(rhs)); }
+{ return gsl::narrow_cast<pa_context_flags_t>(lhs | al::to_underlying(rhs)); }
 constexpr auto operator|=(pa_context_flags_t &lhs, pa_context_flags_t rhs) -> pa_context_flags_t&
 {
     lhs = lhs | rhs;
@@ -273,7 +274,7 @@ constexpr auto operator|=(pa_context_flags_t &lhs, pa_context_flags_t rhs) -> pa
 
 constexpr auto operator|(pa_subscription_mask_t lhs, pa_subscription_mask_t rhs)
     -> pa_subscription_mask_t
-{ return pa_subscription_mask_t(lhs | al::to_underlying(rhs)); }
+{ return gsl::narrow_cast<pa_subscription_mask_t>(lhs | al::to_underlying(rhs)); }
 /* NOLINTEND(*EnumCastOutOfRange) */
 
 
@@ -547,14 +548,14 @@ struct MainloopUniqueLock : public std::unique_lock<PulseMainloop> {
 
     void contextStateCallback(pa_context *context) noexcept
     {
-        pa_context_state_t state{pa_context_get_state(context)};
+        const auto state = pa_context_get_state(context);
         if(state == PA_CONTEXT_READY || !PA_CONTEXT_IS_GOOD(state))
             mutex()->signal();
     }
 
     void streamStateCallback(pa_stream *stream) noexcept
     {
-        pa_stream_state_t state{pa_stream_get_state(stream)};
+        const auto state = pa_stream_get_state(stream);
         if(state == PA_STREAM_READY || !PA_STREAM_IS_GOOD(state))
             mutex()->signal();
     }
@@ -743,7 +744,7 @@ void PulsePlayback::streamWriteCallback(pa_stream *stream, size_t nbytes) noexce
 {
     do {
         auto free_func = pa_free_cb_t{nullptr};
-        auto buflen = static_cast<size_t>(-1);
+        auto buflen = as_unsigned(-1_z);
         auto *buf = voidp{};
         if(pa_stream_begin_write(stream, &buf, &buflen) || !buf) [[unlikely]]
         {
@@ -755,7 +756,7 @@ void PulsePlayback::streamWriteCallback(pa_stream *stream, size_t nbytes) noexce
             buflen = std::min(buflen, nbytes);
         nbytes -= buflen;
 
-        mDevice->renderSamples(buf, static_cast<uint>(buflen/mFrameSize), mSpec.channels);
+        mDevice->renderSamples(buf, gsl::narrow_cast<uint>(buflen/mFrameSize), mSpec.channels);
 
         const auto ret = pa_stream_write(stream, buf, buflen, free_func, 0, PA_SEEK_RELATIVE);
         if(ret != PA_OK) [[unlikely]]
@@ -838,9 +839,9 @@ void PulsePlayback::open(std::string_view name)
     {
         auto plock = MainloopUniqueLock{gGlobalMainloop};
 
-        auto match_name = [name](const DevMap &entry) -> bool
-        { return entry.name == name || entry.device_name == name; };
-        auto iter = std::ranges::find_if(PlaybackDevices, match_name);
+        auto iter = std::ranges::find(PlaybackDevices, name, &DevMap::name);
+        if(iter == PlaybackDevices.end())
+            iter = std::ranges::find(PlaybackDevices, name, &DevMap::device_name);
         if(iter == PlaybackDevices.end())
             throw al::backend_exception{al::backend_error::NoDevice,
                 "Device name \"{}\" not found", name};
@@ -874,7 +875,7 @@ void PulsePlayback::open(std::string_view name)
     static constexpr auto move_callback = [](pa_stream *stream, void *pdata) noexcept
     { return static_cast<PulsePlayback*>(pdata)->streamMovedCallback(stream); };
     pa_stream_set_moved_callback(mStream, move_callback, this);
-    mFrameSize = static_cast<uint>(pa_frame_size(pa_stream_get_sample_spec(mStream)));
+    mFrameSize = gsl::narrow_cast<uint>(pa_frame_size(pa_stream_get_sample_spec(mStream)));
 
     if(!pulse_name.empty())
         mDeviceId.emplace(std::move(pulse_name));
@@ -988,11 +989,11 @@ auto PulsePlayback::reset() -> bool
         break;
     }
     mSpec.rate = mDevice->mSampleRate;
-    mSpec.channels = static_cast<uint8_t>(mDevice->channelsFromFmt());
+    mSpec.channels = gsl::narrow_cast<uint8_t>(mDevice->channelsFromFmt());
     if(pa_sample_spec_valid(&mSpec) == 0)
         throw al::backend_exception{al::backend_error::DeviceError, "Invalid sample spec"};
 
-    const auto frame_size = static_cast<uint>(pa_frame_size(&mSpec));
+    const auto frame_size = gsl::narrow_cast<uint>(pa_frame_size(&mSpec));
     mAttr.maxlength = ~0u;
     mAttr.tlength = mDevice->mBufferSize * frame_size;
     mAttr.prebuf = 0u;
@@ -1011,23 +1012,23 @@ auto PulsePlayback::reset() -> bool
     pa_stream_set_moved_callback(mStream, move_callback, this);
 
     mSpec = *(pa_stream_get_sample_spec(mStream));
-    mFrameSize = static_cast<uint>(pa_frame_size(&mSpec));
+    mFrameSize = gsl::narrow_cast<uint>(pa_frame_size(&mSpec));
 
     if(mDevice->mSampleRate != mSpec.rate)
     {
         /* Server updated our playback rate, so modify the buffer attribs
          * accordingly.
          */
-        const auto scale = static_cast<double>(mSpec.rate) / mDevice->mSampleRate;
+        const auto scale = gsl::narrow_cast<double>(mSpec.rate) / mDevice->mSampleRate;
         const auto perlen = std::clamp(std::round(scale*mDevice->mUpdateSize), 64.0, 8192.0);
         const auto bufmax = uint{std::numeric_limits<int>::max()} / mFrameSize;
         const auto buflen = std::clamp(std::round(scale*mDevice->mBufferSize), perlen*2.0,
-            static_cast<double>(bufmax));
+            gsl::narrow_cast<double>(bufmax));
 
         mAttr.maxlength = ~0u;
-        mAttr.tlength = static_cast<uint>(buflen) * mFrameSize;
+        mAttr.tlength = gsl::narrow_cast<uint>(buflen) * mFrameSize;
         mAttr.prebuf = 0u;
-        mAttr.minreq = static_cast<uint>(perlen) * mFrameSize;
+        mAttr.minreq = gsl::narrow_cast<uint>(perlen) * mFrameSize;
 
         op = pa_stream_set_buffer_attr(mStream, &mAttr, &PulseMainloop::streamSuccessCallbackC,
             &mMainloop);
@@ -1057,7 +1058,7 @@ void PulsePlayback::start()
     if(const auto todo = pa_stream_writable_size(mStream))
     {
         auto *buf = pa_xmalloc(todo);
-        mDevice->renderSamples(buf, static_cast<uint>(todo/mFrameSize), mSpec.channels);
+        mDevice->renderSamples(buf, gsl::narrow_cast<uint>(todo/mFrameSize), mSpec.channels);
         pa_stream_write(mStream, buf, todo, pa_xfree, 0, PA_SEEK_RELATIVE);
     }
 
@@ -1123,7 +1124,7 @@ struct PulseCapture final : public BackendBase {
     void open(std::string_view name) override;
     void start() override;
     void stop() override;
-    void captureSamples(std::byte *buffer, uint samples) override;
+    void captureSamples(std::span<std::byte> outbuffer) override;
     auto availableSamples() -> uint override;
     auto getClockLatency() -> ClockLatency override;
 
@@ -1190,9 +1191,9 @@ void PulseCapture::open(std::string_view name)
     {
         auto plock = MainloopUniqueLock{gGlobalMainloop};
 
-        auto match_name = [name](const DevMap &entry) -> bool
-        { return entry.name == name || entry.device_name == name; };
-        auto iter = std::ranges::find_if(CaptureDevices, match_name);
+        auto iter = std::ranges::find(CaptureDevices, name, &DevMap::name);
+        if(iter == CaptureDevices.end())
+            iter = std::ranges::find(CaptureDevices, name, &DevMap::device_name);
         if(iter == CaptureDevices.end())
             throw al::backend_exception{al::backend_error::NoDevice,
                 "Device name \"{}\" not found", name};
@@ -1225,7 +1226,7 @@ void PulseCapture::open(std::string_view name)
     switch(mDevice->FmtType)
     {
     case DevFmtUByte:
-        mSilentVal = std::byte(0x80);
+        mSilentVal = std::byte{0x80};
         mSpec.format = PA_SAMPLE_U8;
         break;
     case DevFmtShort:
@@ -1244,11 +1245,11 @@ void PulseCapture::open(std::string_view name)
             "{} capture samples not supported", DevFmtTypeString(mDevice->FmtType)};
     }
     mSpec.rate = mDevice->mSampleRate;
-    mSpec.channels = static_cast<uint8_t>(mDevice->channelsFromFmt());
+    mSpec.channels = gsl::narrow_cast<uint8_t>(mDevice->channelsFromFmt());
     if(pa_sample_spec_valid(&mSpec) == 0)
         throw al::backend_exception{al::backend_error::DeviceError, "Invalid sample format"};
 
-    const auto frame_size = static_cast<uint>(pa_frame_size(&mSpec));
+    const auto frame_size = gsl::narrow_cast<uint>(pa_frame_size(&mSpec));
     const auto samples = std::max(mDevice->mBufferSize, mDevice->mSampleRate*100u/1000u);
     mAttr.minreq = ~0u;
     mAttr.prebuf = ~0u;
@@ -1300,30 +1301,28 @@ void PulseCapture::stop()
     plock.waitForOperation(op);
 }
 
-void PulseCapture::captureSamples(std::byte *buffer, uint samples)
+void PulseCapture::captureSamples(std::span<std::byte> outbuffer)
 {
-    auto dstbuf = std::span{buffer, samples * pa_frame_size(&mSpec)};
-
     /* Capture is done in fragment-sized chunks, so we loop until we get all
      * that's available.
      */
-    mLastReadable -= static_cast<uint>(dstbuf.size());
-    while(!dstbuf.empty())
+    mLastReadable -= gsl::narrow_cast<uint>(outbuffer.size());
+    while(!outbuffer.empty())
     {
         if(mHoleLength > 0) [[unlikely]]
         {
-            const auto rem = std::min(dstbuf.size(), mHoleLength);
-            std::ranges::fill(dstbuf | std::views::take(rem), mSilentVal);
-            dstbuf = dstbuf.subspan(rem);
+            const auto rem = std::min(outbuffer.size(), mHoleLength);
+            std::ranges::fill(outbuffer | std::views::take(rem), mSilentVal);
+            outbuffer = outbuffer.subspan(rem);
             mHoleLength -= rem;
 
             continue;
         }
         if(!mCapBuffer.empty())
         {
-            const auto rem = std::min(dstbuf.size(), mCapBuffer.size());
-            std::ranges::copy(mCapBuffer | std::views::take(rem), dstbuf.begin());
-            dstbuf = dstbuf.subspan(rem);
+            const auto rem = std::min(outbuffer.size(), mCapBuffer.size());
+            std::ranges::copy(mCapBuffer | std::views::take(rem), outbuffer.begin());
+            outbuffer = outbuffer.subspan(rem);
             mCapBuffer = mCapBuffer.subspan(rem);
 
             continue;
@@ -1363,8 +1362,8 @@ void PulseCapture::captureSamples(std::byte *buffer, uint samples)
             mCapBuffer = {static_cast<const std::byte*>(capbuf), caplen};
         mPacketLength = caplen;
     }
-    if(!dstbuf.empty())
-        std::ranges::fill(dstbuf, mSilentVal);
+    if(!outbuffer.empty())
+        std::ranges::fill(outbuffer, mSilentVal);
 }
 
 auto PulseCapture::availableSamples() -> uint
@@ -1375,9 +1374,9 @@ auto PulseCapture::availableSamples() -> uint
     {
         auto plock = MainloopUniqueLock{mMainloop};
         auto got = pa_stream_readable_size(mStream);
-        if(static_cast<ssize_t>(got) < 0) [[unlikely]]
+        if(as_signed(got) < 0) [[unlikely]]
         {
-            auto *err = pa_strerror(static_cast<int>(got));
+            auto *err = pa_strerror(gsl::narrow_cast<int>(as_signed(got)));
             ERR("pa_stream_readable_size() failed: {}", err);
             mDevice->handleDisconnect("Failed getting readable size: {}", err);
         }
@@ -1395,8 +1394,8 @@ auto PulseCapture::availableSamples() -> uint
 
     /* Avoid uint overflow, and avoid decreasing the readable count. */
     readable = std::min<size_t>(readable, std::numeric_limits<uint>::max());
-    mLastReadable = std::max(mLastReadable, static_cast<uint>(readable));
-    return mLastReadable / static_cast<uint>(pa_frame_size(&mSpec));
+    mLastReadable = std::max(mLastReadable, gsl::narrow_cast<uint>(readable));
+    return mLastReadable / gsl::narrow_cast<uint>(pa_frame_size(&mSpec));
 }
 
 
@@ -1441,26 +1440,33 @@ auto PulseBackendFactory::init() -> bool
 #else
         auto *libname = "libpulse.so.0";
 #endif
-        pulse_handle = LoadLib(libname);
-        if(!pulse_handle)
+        if(auto libresult = LoadLib(libname))
+            pulse_handle = libresult.value();
+        else
         {
-            WARN("Failed to load {}", libname);
+            WARN("Failed to load {}: {}", libname, libresult.error());
             return false;
         }
 
-        auto missing_funcs = std::string{};
-#define LOAD_FUNC(x) do {                                                     \
-    p##x = reinterpret_cast<decltype(p##x)>(GetSymbol(pulse_handle, #x));     \
-    if(!(p##x)) missing_funcs += "\n" #x;                                     \
-} while(0)
-        /* NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast) */
-        PULSE_FUNCS(LOAD_FUNC)
-        /* NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast) */
-#undef LOAD_FUNC
-
-        if(!missing_funcs.empty())
+        static constexpr auto load_func = [](auto *&func, const char *name) -> bool
         {
-            WARN("Missing expected functions:{}", missing_funcs);
+            using func_t = std::remove_reference_t<decltype(func)>;
+            auto funcresult = GetSymbol(pulse_handle, name);
+            if(!funcresult)
+            {
+                WARN("Failed to load function {}: {}", name, funcresult.error());
+                return false;
+            }
+            /* NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) */
+            func = reinterpret_cast<func_t>(funcresult.value());
+            return true;
+        };
+        auto ok = true;
+#define LOAD_FUNC(f) ok &= load_func(p##f, #f)
+        PULSE_FUNCS(LOAD_FUNC)
+#undef LOAD_FUNC
+        if(!ok)
+        {
             CloseLib(pulse_handle);
             pulse_handle = nullptr;
             return false;

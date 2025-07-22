@@ -25,7 +25,6 @@
 
 #include <algorithm>
 #include <bit>
-#include <cassert>
 #include <cctype>
 #include <cmath>
 #include <cstdarg>
@@ -49,6 +48,7 @@
 #include "alstring.h"
 #include "filesystem.h"
 #include "fmt/core.h"
+#include "gsl/gsl"
 #include "makemhr.h"
 #include "polyphase_resampler.h"
 #include "sofa-support.h"
@@ -175,7 +175,7 @@ void TrSetup(const std::span<const char> startbytes, const std::string_view file
 
     if(!startbytes.empty())
     {
-        assert(startbytes.size() <= tr->mRing.size());
+        Expects(startbytes.size() <= tr->mRing.size());
         std::ranges::copy(startbytes, tr->mRing.begin());
         tr->mIn += std::ssize(startbytes);
     }
@@ -260,7 +260,7 @@ auto TrSkipWhitespace(TokenReaderT *tr) -> bool
 {
     while(TrLoad(tr))
     {
-        char ch{tr->mRing[tr->mOut&TRRingMask]};
+        const auto ch = tr->mRing[tr->mOut&TRRingMask];
         if(isspace(ch))
         {
             tr->mOut++;
@@ -294,7 +294,7 @@ auto TrIsIdent(TokenReaderT *tr) -> bool
 {
     if(!TrSkipWhitespace(tr))
         return false;
-    char ch{tr->mRing[tr->mOut&TRRingMask]};
+    const auto ch = tr->mRing[tr->mOut&TRRingMask];
     return ch == '_' || isalpha(ch);
 }
 
@@ -841,14 +841,13 @@ auto ReadWaveList(std::istream &istream, const SourceRefT *src, const std::endia
         if(fourCC == FOURCC_DATA)
         {
             const auto block = src->mSize * src->mSkip;
-            const auto count = chunkSize / block;
-            if(count < (src->mOffset + hrir.size()))
+            if(chunkSize / block < (src->mOffset + hrir.size()))
             {
                 fmt::println(stderr, "\nError: Bad read from file '{}'.", src->mPath);
                 return false;
             }
             using off_type = std::istream::off_type;
-            istream.seekg(off_type(src->mOffset) * off_type(block), std::ios::cur);
+            istream.seekg(gsl::narrow_cast<off_type>(size_t{src->mOffset} * block), std::ios::cur);
             if(!ReadWaveData(istream, src, order, hrir))
                 return false;
             return true;
@@ -882,7 +881,7 @@ auto ReadWaveList(std::istream &istream, const SourceRefT *src, const std::endia
             if(count > skip)
             {
                 using off_type = std::istream::off_type;
-                istream.seekg(off_type(skip) * off_type(block), std::ios::cur);
+                istream.seekg(gsl::narrow_cast<off_type>(size_t{skip} * block), std::ios::cur);
                 chunkSize -= skip * block;
                 count -= skip;
                 skip = 0;
@@ -1681,9 +1680,10 @@ auto AverageHrirOnset(PPhaseResampler &rs, std::span<double> upsampled, const ui
 {
     rs.process(hrir, upsampled);
 
-    auto iter = std::ranges::max_element(upsampled, [](const double lhs, const double rhs) -> bool
-    { return std::abs(lhs) < std::abs(rhs); });
-    return Lerp(onset, static_cast<double>(std::distance(upsampled.begin(), iter)) / (10*rate), f);
+    const auto iter = std::ranges::max_element(upsampled, std::less{},
+        [](const double value) -> double { return std::abs(value); });
+    return std::lerp(onset, gsl::narrow_cast<double>(std::distance(upsampled.begin(), iter))
+        / (10*rate), f);
 }
 
 // Calculate the magnitude response of an HRIR and average it with any
@@ -1695,12 +1695,12 @@ void AverageHrirMagnitude(const uint fftSize, const std::span<const double> hrir
     std::vector<complex_d> h(fftSize);
     std::vector<double> r(m);
 
-    auto hiter = std::copy(hrir.begin(), hrir.end(), h.begin());
+    const auto hiter = std::ranges::copy(hrir, h.begin()).out;
     std::fill(hiter, h.end(), 0.0);
     forward_fft(h);
     MagnitudeResponse(h, r);
     for(uint i{0};i < m;++i)
-        mag[i] = Lerp(mag[i], r[i], f);
+        mag[i] = std::lerp(mag[i], r[i], f);
 }
 
 // Process the list of sources in the data set definition.

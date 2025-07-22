@@ -4,9 +4,12 @@
 #include "config.h"
 
 #include <array>
+#include <bitset>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <limits>
 #include <numbers>
 #include <span>
@@ -21,6 +24,7 @@
 #include "alnumeric.h"
 #include "core/context.h"
 #include "core/voice.h"
+#include "gsl/gsl"
 #include "intrusive_ptr.h"
 
 #if ALSOFT_EAX
@@ -52,11 +56,12 @@ struct ALbufferQueueItem : public VoiceBufferItem {
 
 
 #if ALSOFT_EAX
+/* NOLINTNEXTLINE(clazy-copyable-polymorphic) Exceptions must be copyable. */
 class EaxSourceException : public EaxException {
 public:
-    explicit EaxSourceException(const char* message)
+    explicit EaxSourceException(const std::string_view message)
         : EaxException{"EAX_SOURCE", message}
-    {}
+    { }
 };
 #endif // ALSOFT_EAX
 
@@ -163,18 +168,20 @@ struct ALsource {
     ALsource(const ALsource&) = delete;
     ALsource& operator=(const ALsource&) = delete;
 
-    static void SetName(ALCcontext *context, ALuint id, std::string_view name);
+    static void SetName(gsl::strict_not_null<ALCcontext*> context, ALuint id,
+        std::string_view name);
 
     DISABLE_ALLOC
 
 #if ALSOFT_EAX
 public:
-    void eaxInitialize(ALCcontext *context) noexcept;
+    void eaxInitialize(gsl::strict_not_null<ALCcontext*> context) noexcept;
     void eaxDispatch(const EaxCall& call) { call.is_get() ? eax_get(call) : eax_set(call); }
     void eaxCommit();
     void eaxMarkAsChanged() noexcept { mEaxChanged = true; }
 
-    static ALsource* EaxLookupSource(ALCcontext& al_context, ALuint source_id) noexcept;
+    static auto EaxLookupSource(gsl::strict_not_null<ALCcontext*> al_context LIFETIMEBOUND,
+        ALuint source_id) noexcept -> ALsource*;
 
 private:
     using Exception = EaxSourceException;
@@ -197,7 +204,7 @@ private:
         &EAXPROPERTYID_EAX50_FXSlot3,
     };
 
-    using EaxActiveFxSlots = std::array<bool, EAX_MAX_FXSLOTS>;
+    using EaxActiveFxSlots = std::bitset<EAX_MAX_FXSLOTS>;
     using EaxSpeakerLevels = std::array<EAXSPEAKERLEVELPROPERTIES, eax_max_speakers>;
     using EaxSends = std::array<EAXSOURCEALLSENDPROPERTIES, EAX_MAX_FXSLOTS>;
 
@@ -241,7 +248,7 @@ private:
 
     ALCcontext* mEaxAlContext{};
     EaxFxSlotIndex mEaxPrimaryFxSlotId{};
-    EaxActiveFxSlots mEaxActiveFxSlots{};
+    EaxActiveFxSlots mEaxActiveFxSlots;
     int mEaxVersion{};
     bool mEaxChanged{};
     Eax1State mEax1{};
@@ -662,8 +669,8 @@ private:
         }
     };
 
-    struct Eax4SendValidator : EaxSendValidator<Eax4SendReceivingFxSlotIdValidator> {};
-    struct Eax5SendValidator : EaxSendValidator<Eax5SendReceivingFxSlotIdValidator> {};
+    using Eax4SendValidator = EaxSendValidator<Eax4SendReceivingFxSlotIdValidator>;
+    using Eax5SendValidator = EaxSendValidator<Eax5SendReceivingFxSlotIdValidator>;
 
     template<typename TIdValidator>
     struct EaxOcclusionSendValidator {
@@ -677,8 +684,8 @@ private:
         }
     };
 
-    struct Eax4OcclusionSendValidator : EaxOcclusionSendValidator<Eax4SendReceivingFxSlotIdValidator> {};
-    struct Eax5OcclusionSendValidator : EaxOcclusionSendValidator<Eax5SendReceivingFxSlotIdValidator> {};
+    using Eax4OcclusionSendValidator = EaxOcclusionSendValidator<Eax4SendReceivingFxSlotIdValidator>;
+    using Eax5OcclusionSendValidator = EaxOcclusionSendValidator<Eax5SendReceivingFxSlotIdValidator>;
 
     template<typename TIdValidator>
     struct EaxExclusionSendValidator {
@@ -690,8 +697,8 @@ private:
         }
     };
 
-    struct Eax4ExclusionSendValidator : EaxExclusionSendValidator<Eax4SendReceivingFxSlotIdValidator> {};
-    struct Eax5ExclusionSendValidator : EaxExclusionSendValidator<Eax5SendReceivingFxSlotIdValidator> {};
+    using Eax4ExclusionSendValidator = EaxExclusionSendValidator<Eax4SendReceivingFxSlotIdValidator>;
+    using Eax5ExclusionSendValidator = EaxExclusionSendValidator<Eax5SendReceivingFxSlotIdValidator>;
 
     template<typename TIdValidator>
     struct EaxAllSendValidator {
@@ -709,8 +716,8 @@ private:
         }
     };
 
-    struct Eax4AllSendValidator : EaxAllSendValidator<Eax4SendReceivingFxSlotIdValidator> {};
-    struct Eax5AllSendValidator : EaxAllSendValidator<Eax5SendReceivingFxSlotIdValidator> {};
+    using Eax4AllSendValidator = EaxAllSendValidator<Eax4SendReceivingFxSlotIdValidator>;
+    using Eax5AllSendValidator = EaxAllSendValidator<Eax5SendReceivingFxSlotIdValidator>;
 
     // Send validators
     // ----------------------------------------------------------------------
@@ -815,7 +822,7 @@ private:
         }
     };
 
-    [[noreturn]] static void eax_fail(const char* message);
+    [[noreturn]] static void eax_fail(const std::string_view message);
     [[noreturn]] static void eax_fail_unknown_property_id();
     [[noreturn]] static void eax_fail_unknown_version();
     [[noreturn]] static void eax_fail_unknown_active_fx_slot_id();
@@ -844,10 +851,8 @@ private:
     static void eax3_translate(const EAX30SOURCEPROPERTIES& src, Eax5Props& dst) noexcept;
     static void eax4_translate(const Eax4Props& src, Eax5Props& dst) noexcept;
 
-    static float eax_calculate_dst_occlusion_mb(
-        long src_occlusion_mb,
-        float path_ratio,
-        float lf_ratio) noexcept;
+    static auto eax_calculate_dst_occlusion_mb(long src_occlusion_mb, float path_ratio,
+        float lf_ratio) noexcept -> float;
 
     [[nodiscard]] auto eax_create_direct_filter_param() const noexcept -> EaxAlLowPassParam;
 
@@ -858,31 +863,27 @@ private:
     void eax_update_room_filters();
     void eax_commit_filters();
 
-    static void eax_copy_send_for_get(
-        const EAXSOURCEALLSENDPROPERTIES& src,
+    static void eax_copy_send_for_get(const EAXSOURCEALLSENDPROPERTIES& src,
         EAXSOURCESENDPROPERTIES& dst) noexcept
     {
         dst.guidReceivingFXSlotID = src.guidReceivingFXSlotID;
         dst.mSend = src.mSend;
     }
 
-    static void eax_copy_send_for_get(
-        const EAXSOURCEALLSENDPROPERTIES& src,
+    static void eax_copy_send_for_get(const EAXSOURCEALLSENDPROPERTIES& src,
         EAXSOURCEALLSENDPROPERTIES& dst) noexcept
     {
         dst = src;
     }
 
-    static void eax_copy_send_for_get(
-        const EAXSOURCEALLSENDPROPERTIES& src,
+    static void eax_copy_send_for_get(const EAXSOURCEALLSENDPROPERTIES& src,
         EAXSOURCEOCCLUSIONSENDPROPERTIES& dst) noexcept
     {
         dst.guidReceivingFXSlotID = src.guidReceivingFXSlotID;
         dst.mOcclusion = src.mOcclusion;
     }
 
-    static void eax_copy_send_for_get(
-        const EAXSOURCEALLSENDPROPERTIES& src,
+    static void eax_copy_send_for_get(const EAXSOURCEALLSENDPROPERTIES& src,
         EAXSOURCEEXCLUSIONSENDPROPERTIES& dst) noexcept
     {
         dst.guidReceivingFXSlotID = src.guidReceivingFXSlotID;
@@ -890,113 +891,101 @@ private:
     }
 
     template<typename TDstSend>
-    void eax_get_sends(const EaxCall& call, const EaxSends& src_sends)
+    static void eax_get_sends(const EaxCall &call, const EaxSends &src_sends)
     {
-        const auto dst_sends = call.get_values<TDstSend>(EAX_MAX_FXSLOTS);
-        const auto count = dst_sends.size();
-
-        for(auto i = decltype(count){}; i < count; ++i)
+        const auto dst_sends = call.as_span<TDstSend>(EAX_MAX_FXSLOTS);
+        for(const auto i : std::views::iota(0_uz, dst_sends.size()))
         {
-            const auto& src_send = src_sends[i];
-            auto& dst_send = dst_sends[i];
+            const auto &src_send = src_sends[i];
+            auto &dst_send = dst_sends[i];
             eax_copy_send_for_get(src_send, dst_send);
         }
     }
 
-    static void eax_get_active_fx_slot_id(const EaxCall& call, const std::span<const GUID> srcids);
-    static void eax1_get(const EaxCall& call, const EAXBUFFER_REVERBPROPERTIES& props);
-    static void eax2_get(const EaxCall& call, const EAX20BUFFERPROPERTIES& props);
-    static void eax3_get_obstruction(const EaxCall& call, const EAX30SOURCEPROPERTIES& props);
-    static void eax3_get_occlusion(const EaxCall& call, const EAX30SOURCEPROPERTIES& props);
-    static void eax3_get_exclusion(const EaxCall& call, const EAX30SOURCEPROPERTIES& props);
-    static void eax3_get(const EaxCall& call, const EAX30SOURCEPROPERTIES& props);
-    void eax4_get(const EaxCall& call, const Eax4Props& props);
-    static void eax5_get_all_2d(const EaxCall& call, const EAX50SOURCEPROPERTIES& props);
-    static void eax5_get_speaker_levels(const EaxCall& call, const EaxSpeakerLevels& props);
-    void eax5_get(const EaxCall& call, const Eax5Props& props);
-    void eax_get(const EaxCall& call);
+    static void eax_get_active_fx_slot_id(const EaxCall &call, const std::span<const GUID> srcids);
+    static void eax1_get(const EaxCall &call, const EAXBUFFER_REVERBPROPERTIES &props);
+    static void eax2_get(const EaxCall &call, const EAX20BUFFERPROPERTIES &props);
+    static void eax3_get(const EaxCall &call, const EAX30SOURCEPROPERTIES &props);
+    static void eax4_get(const EaxCall &call, const Eax4Props &props);
+    static void eax5_get_all_2d(const EaxCall &call, const EAX50SOURCEPROPERTIES &props);
+    static void eax5_get_speaker_levels(const EaxCall &call, const EaxSpeakerLevels &props);
+    static void eax5_get(const EaxCall &call, const Eax5Props &props);
+    void eax_get(const EaxCall &call) const;
 
-    static void eax_copy_send_for_set(
-        const EAXSOURCEALLSENDPROPERTIES& src,
-        EAXSOURCEALLSENDPROPERTIES& dst) noexcept
+    static void eax_copy_send_for_set(const EAXSOURCEALLSENDPROPERTIES &src,
+        EAXSOURCEALLSENDPROPERTIES &dst) noexcept
     {
         dst.mSend = src.mSend;
         dst.mOcclusion = src.mOcclusion;
         dst.mExclusion = src.mExclusion;
     }
 
-    static void eax_copy_send_for_set(
-        const EAXSOURCESENDPROPERTIES& src,
-        EAXSOURCEALLSENDPROPERTIES& dst) noexcept
+    static void eax_copy_send_for_set(const EAXSOURCESENDPROPERTIES &src,
+        EAXSOURCEALLSENDPROPERTIES &dst) noexcept
     {
         dst.mSend = src.mSend;
     }
 
-    static void eax_copy_send_for_set(
-        const EAXSOURCEOCCLUSIONSENDPROPERTIES& src,
-        EAXSOURCEALLSENDPROPERTIES& dst) noexcept
+    static void eax_copy_send_for_set(const EAXSOURCEOCCLUSIONSENDPROPERTIES &src,
+        EAXSOURCEALLSENDPROPERTIES &dst) noexcept
     {
         dst.mOcclusion = src.mOcclusion;
     }
 
-    static void eax_copy_send_for_set(
-        const EAXSOURCEEXCLUSIONSENDPROPERTIES& src,
-        EAXSOURCEALLSENDPROPERTIES& dst) noexcept
+    static void eax_copy_send_for_set(const EAXSOURCEEXCLUSIONSENDPROPERTIES &src,
+        EAXSOURCEALLSENDPROPERTIES &dst) noexcept
     {
         dst.mExclusion = src.mExclusion;
     }
 
-    template<typename TValidator, typename TIndexGetter, typename TSrcSend>
-    void eax_defer_sends(const EaxCall& call, EaxSends& dst_sends)
+    template<std::invocable<const GUID&> TIndexGetter, typename TSrcSend>
+    static void eax_defer_sends(const EaxCall &call, EaxSends &dst_sends,
+        std::invocable<TSrcSend> auto&& validator)
     {
-        static constexpr auto index_getter = TIndexGetter{};
-        const auto src_sends = call.get_values<const TSrcSend>(EAX_MAX_FXSLOTS);
-        std::ranges::for_each(src_sends, TValidator{});
+        const auto src_sends = call.as_span<const TSrcSend>(EAX_MAX_FXSLOTS);
+        std::ranges::for_each(src_sends, std::forward<decltype(validator)>(validator));
 
         std::ranges::for_each(src_sends, [&dst_sends](const TSrcSend &src_send)
         {
-            const auto dst_index = index_getter(src_send.guidReceivingFXSlotID);
+            const auto dst_index = std::invoke(TIndexGetter{}, src_send.guidReceivingFXSlotID);
             eax_copy_send_for_set(src_send, dst_sends[dst_index]);
         });
     }
 
-    template<typename TValidator, typename TSrcSend>
-    void eax4_defer_sends(const EaxCall& call, EaxSends& dst_sends)
-    {
-        eax_defer_sends<TValidator, Eax4SendIndexGetter, TSrcSend>(call, dst_sends);
-    }
+    template<typename TSrcSend>
+    static void eax4_defer_sends(const EaxCall &call, EaxSends &dst_sends,
+        std::invocable<TSrcSend> auto validator)
+    { eax_defer_sends<Eax4SendIndexGetter, TSrcSend>(call, dst_sends, std::move(validator)); }
 
-    template<typename TValidator, typename TSrcSend>
-    void eax5_defer_sends(const EaxCall& call, EaxSends& dst_sends)
-    {
-        eax_defer_sends<TValidator, Eax5SendIndexGetter, TSrcSend>(call, dst_sends);
-    }
+    template<typename TSrcSend>
+    static void eax5_defer_sends(const EaxCall &call, EaxSends &dst_sends,
+        std::invocable<TSrcSend> auto validator)
+    { eax_defer_sends<Eax5SendIndexGetter, TSrcSend>(call, dst_sends, std::move(validator)); }
 
-    template<typename TValidator, size_t TIdCount>
-    void eax_defer_active_fx_slot_id(const EaxCall& call, const std::span<GUID,TIdCount> dst_ids)
+    template<std::invocable<const GUID&> TValidator>
+    static void eax_defer_active_fx_slot_id(const EaxCall &call, const std::span<GUID> dst_ids)
     {
-        const auto src_ids = call.get_values<const GUID>(TIdCount);
+        const auto src_ids = call.as_span<const GUID>(dst_ids.size());
         std::ranges::for_each(src_ids, TValidator{});
         std::ranges::uninitialized_copy(src_ids, dst_ids);
     }
 
-    template<size_t TIdCount>
-    void eax4_defer_active_fx_slot_id(const EaxCall& call, const std::span<GUID,TIdCount> dst_ids)
+    static void eax4_defer_active_fx_slot_id(const EaxCall &call, const std::span<GUID> dst_ids)
     {
         eax_defer_active_fx_slot_id<Eax4ActiveFxSlotIdValidator>(call, dst_ids);
     }
 
-    template<size_t TIdCount>
-    void eax5_defer_active_fx_slot_id(const EaxCall& call, const std::span<GUID,TIdCount> dst_ids)
+    static void eax5_defer_active_fx_slot_id(const EaxCall &call, const std::span<GUID> dst_ids)
     {
         eax_defer_active_fx_slot_id<Eax5ActiveFxSlotIdValidator>(call, dst_ids);
     }
 
-    template<typename TValidator, typename TProperty>
-    static void eax_defer(const EaxCall& call, TProperty& property)
+    template<typename TProperty>
+    static void eax_defer(const EaxCall &call, TProperty &property,
+        std::invocable<TProperty> auto&& validator)
     {
-        const auto& value = call.get_value<Exception, const TProperty>();
-        TValidator{}(value);
+        const auto& value = call.load<const TProperty>();
+        std::forward<decltype(validator)>(validator)(value);
         property = value;
     }
 
@@ -1012,21 +1001,21 @@ private:
     static void eax1_set(const EaxCall& call, EAXBUFFER_REVERBPROPERTIES& props);
     static void eax2_set(const EaxCall& call, EAX20BUFFERPROPERTIES& props);
     static void eax3_set(const EaxCall& call, EAX30SOURCEPROPERTIES& props);
-    void eax4_set(const EaxCall& call, Eax4Props& props);
+    static void eax4_set(const EaxCall& call, Eax4Props& props);
     static void eax5_defer_all_2d(const EaxCall& call, EAX50SOURCEPROPERTIES& props);
     static void eax5_defer_speaker_levels(const EaxCall& call, EaxSpeakerLevels& props);
-    void eax5_set(const EaxCall& call, Eax5Props& props);
+    static void eax5_set(const EaxCall& call, Eax5Props& props);
     void eax_set(const EaxCall& call);
 
     // `alSource3i(source, AL_AUXILIARY_SEND_FILTER, ...)`
-    void eax_set_al_source_send(ALeffectslot *slot, size_t sendidx,
+    void eax_set_al_source_send(al::intrusive_ptr<ALeffectslot> slot, size_t sendidx,
         const EaxAlLowPassParam &filter);
 
     void eax_commit_active_fx_slots();
 #endif // ALSOFT_EAX
 };
 
-void UpdateAllSourceProps(ALCcontext *context);
+void UpdateAllSourceProps(gsl::strict_not_null<ALCcontext*> context);
 
 struct SourceSubList {
     uint64_t FreeMask{~0_u64};
@@ -1039,7 +1028,7 @@ struct SourceSubList {
     ~SourceSubList();
 
     SourceSubList& operator=(const SourceSubList&) = delete;
-    SourceSubList& operator=(SourceSubList&& rhs) noexcept
+    SourceSubList& operator=(SourceSubList&& rhs) & noexcept
     { std::swap(FreeMask, rhs.FreeMask); std::swap(Sources, rhs.Sources); return *this; }
 };
 

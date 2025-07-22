@@ -62,7 +62,7 @@ constexpr auto HilStep{HilSize / OversampleFactor};
 struct Windower {
     alignas(16) std::array<double,HilSize> mData{};
 
-    Windower()
+    Windower() noexcept
     {
         static constexpr auto scale = std::numbers::pi / double{HilSize};
         /* Create lookup table of the Hann window for the desired size. */
@@ -129,7 +129,7 @@ void FshifterState::update(const ContextBase *context, const EffectSlot *slot,
     const EffectProps *props_, const EffectTarget target)
 {
     auto &props = std::get<FshifterProps>(*props_);
-    const auto *device = context->mDevice;
+    auto const device = al::get_not_null(context->mDevice);
 
     const auto step = props.Frequency / static_cast<float>(device->mSampleRate);
     std::ranges::fill(mChans | std::views::transform(&OutParams::mPhaseStep),
@@ -245,8 +245,8 @@ struct FshifterStateFactory final : public EffectStateFactory {
 
 } // namespace
 
-EffectStateFactory *FshifterStateFactory_getFactory()
+auto FshifterStateFactory_getFactory() -> gsl::strict_not_null<EffectStateFactory*>
 {
     static FshifterStateFactory FshifterFactory{};
-    return &FshifterFactory;
+    return gsl::make_not_null(&FshifterFactory);
 }

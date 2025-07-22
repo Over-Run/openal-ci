@@ -6,15 +6,18 @@
 #include <cstddef>
 #include <numbers>
 #include <numeric>
+#include <ranges>
 #include <stdexcept>
 #include <tuple>
+
+#include "gsl/gsl"
 
 
 using uint = unsigned int;
 
 namespace {
 
-constexpr double Epsilon{1e-9};
+constexpr auto Epsilon = 1e-9;
 
 
 /* The zero-order modified Bessel function of the first kind, used for the
@@ -34,23 +37,23 @@ constexpr auto cyl_bessel_i(T nu, U x) -> U
         throw std::runtime_error{"cyl_bessel_i: nu != 0"};
 
     /* Start at k=1 since k=0 is trivial. */
-    const double x2{x/2.0};
-    double term{1.0};
-    double sum{1.0};
-    int k{1};
+    const auto x2 = x/2.0;
+    auto term = 1.0;
+    auto sum = 1.0;
+    auto k = 1;
 
     /* Let the integration converge until the term of the sum is no longer
      * significant.
      */
-    double last_sum{};
+    auto last_sum = 0.0;
     do {
-        const double y{x2 / k};
+        const auto y = x2 / k;
         ++k;
         last_sum = sum;
         term *= y * y;
         sum += term;
     } while(sum != last_sum);
-    return static_cast<U>(sum);
+    return gsl::narrow_cast<U>(sum);
 }
 
 /* This is the normalized cardinal sine (sinc) function.
@@ -58,7 +61,7 @@ constexpr auto cyl_bessel_i(T nu, U x) -> U
  *   sinc(x) = { 1,                   x = 0
  *             { sin(pi x) / (pi x),  otherwise.
  */
-double Sinc(const double x)
+auto Sinc(const double x) -> double
 {
     if(std::abs(x) < Epsilon) [[unlikely]]
         return 1.0;
@@ -79,7 +82,7 @@ double Sinc(const double x)
  *
  *   k = 2 i / M - 1,   where 0 <= i <= M.
  */
-double Kaiser(const double beta, const double k, const double besseli_0_beta)
+auto Kaiser(const double beta, const double k, const double besseli_0_beta) -> double
 {
     if(!(k >= -1.0 && k <= 1.0))
         return 0.0;
@@ -93,22 +96,22 @@ double Kaiser(const double beta, const double k, const double besseli_0_beta)
  *       { ceil(5.79 / 2 pi f_t),                r <= 21.
  *
  */
-constexpr uint CalcKaiserOrder(const double rejection, const double transition)
+constexpr auto CalcKaiserOrder(const double rejection, const double transition) -> uint
 {
     const auto w_t = 2.0 * std::numbers::pi * transition;
     if(rejection > 21.0) [[likely]]
-        return static_cast<uint>(std::ceil((rejection - 7.95) / (2.285 * w_t)));
-    return static_cast<uint>(std::ceil(5.79 / w_t));
+        return gsl::narrow_cast<uint>(std::ceil((rejection - 7.95) / (2.285 * w_t)));
+    return gsl::narrow_cast<uint>(std::ceil(5.79 / w_t));
 }
 
 // Calculates the beta value of the Kaiser window.  Rejection is in dB.
-constexpr double CalcKaiserBeta(const double rejection)
+constexpr auto CalcKaiserBeta(const double rejection) -> double
 {
     if(rejection > 50.0) [[likely]]
         return 0.1102 * (rejection - 8.7);
     if(rejection >= 21.0)
         return (0.5842 * std::pow(rejection - 21.0, 0.4)) +
-               (0.07886 * (rejection - 21.0));
+            (0.07886 * (rejection - 21.0));
     return 0.0;
 }
 
@@ -127,7 +130,7 @@ constexpr double CalcKaiserBeta(const double rejection)
 auto SincFilter(const uint l, const double beta, const double besseli_0_beta, const double gain,
     const double cutoff, const uint i) -> double
 {
-    const auto x = static_cast<double>(i) - l;
+    const auto x = gsl::narrow_cast<double>(i) - l;
     return Kaiser(beta, x/l, besseli_0_beta) * 2.0 * gain * cutoff * Sinc(2.0 * cutoff * x);
 }
 
@@ -151,13 +154,13 @@ void PPhaseResampler::init(const uint srcRate, const uint dstRate)
     // calculating the left offset to avoid increasing the transition width.
     static constexpr auto rejection = 180.0;
     const auto l = (CalcKaiserOrder(rejection, width)+1u) / 2u;
-    const auto beta = CalcKaiserBeta(rejection);
-    const auto besseli_0_beta = ::cyl_bessel_i(0, beta);
+    static constexpr auto beta = CalcKaiserBeta(rejection);
+    static constexpr auto besseli_0_beta = ::cyl_bessel_i(0, beta);
     mM = l*2u + 1u;
     mL = l;
     mF.resize(mM);
-    for(uint i{0};i < mM;i++)
-        mF[i] = SincFilter(mL, beta, besseli_0_beta, mP, cutoff, i);
+    std::ranges::transform(std::views::iota(0u, mM), mF.begin(), [this,cutoff](const uint i)
+    { return SincFilter(mL, beta, besseli_0_beta, mP, cutoff, i); });
 }
 
 // Perform the upsample-filter-downsample resampling operation using a
@@ -184,7 +187,7 @@ void PPhaseResampler::process(const std::span<const double> in, const std::span<
      * build-up from the first half of the filter.
      */
     auto l = size_t{mL};
-    std::generate(work.begin(), work.end(), [in,f,p,q,m,&l]
+    std::ranges::generate(work, [in,f,p,q,m,&l]
     {
         auto j_s = l / p;
         auto j_f = l % p;
@@ -216,5 +219,5 @@ void PPhaseResampler::process(const std::span<const double> in, const std::span<
     });
     // Clean up after in-place operation.
     if(work.data() != out.data())
-        std::copy(work.begin(), work.end(), out.begin());
+        std::ranges::copy(work, out.begin());
 }

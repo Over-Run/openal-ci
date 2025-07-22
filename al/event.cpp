@@ -142,46 +142,8 @@ constexpr auto GetEventType(ALenum etype) noexcept -> std::optional<AsyncEnableB
     return std::nullopt;
 }
 
-} // namespace
 
-
-void StartEventThrd(ALCcontext *ctx)
-{
-    try {
-        ctx->mEventThread = std::thread{EventThread, ctx};
-    }
-    catch(std::exception& e) {
-        ERR("Failed to start event thread: {}", e.what());
-    }
-    catch(...) {
-        ERR("Failed to start event thread! Expect problems.");
-    }
-}
-
-void StopEventThrd(ALCcontext *ctx)
-{
-    auto *ring = ctx->mAsyncEvents.get();
-    auto evt_span = ring->getWriteVector()[0];
-    if(evt_span.empty())
-    {
-        do {
-            std::this_thread::yield();
-            evt_span = ring->getWriteVector()[0];
-        } while(evt_span.empty());
-    }
-    std::ignore = InitAsyncEvent<AsyncKillThread>(evt_span[0]);
-    ring->writeAdvance(1);
-
-    if(ctx->mEventThread.joinable())
-    {
-        ctx->mEventsPending.store(true, std::memory_order_release);
-        ctx->mEventsPending.notify_all();
-        ctx->mEventThread.join();
-    }
-}
-
-AL_API DECL_FUNCEXT3(void, alEventControl,SOFT, ALsizei,count, const ALenum*,types, ALboolean,enable)
-FORCE_ALIGN void AL_APIENTRY alEventControlDirectSOFT(ALCcontext *context, ALsizei count,
+void AL_APIENTRY alEventControlSOFT(gsl::strict_not_null<ALCcontext*> context, ALsizei count,
     const ALenum *types, ALboolean enable) noexcept
 try {
     if(count < 0)
@@ -231,8 +193,7 @@ catch(std::exception &e) {
     ERR("Caught exception: {}", e.what());
 }
 
-AL_API DECL_FUNCEXT2(void, alEventCallback,SOFT, ALEVENTPROCSOFT,callback, void*,userParam)
-FORCE_ALIGN void AL_APIENTRY alEventCallbackDirectSOFT(ALCcontext *context,
+void AL_APIENTRY alEventCallbackSOFT(gsl::strict_not_null<ALCcontext*> context,
     ALEVENTPROCSOFT callback, void *userParam) noexcept
 try {
     auto eventlock = std::lock_guard{context->mEventCbLock};
@@ -244,3 +205,44 @@ catch(al::base_exception&) {
 catch(std::exception &e) {
     ERR("Caught exception: {}", e.what());
 }
+
+} // namespace
+
+
+void StartEventThrd(ALCcontext *ctx)
+{
+    try {
+        ctx->mEventThread = std::thread{EventThread, ctx};
+    }
+    catch(std::exception& e) {
+        ERR("Failed to start event thread: {}", e.what());
+    }
+    catch(...) {
+        ERR("Failed to start event thread! Expect problems.");
+    }
+}
+
+void StopEventThrd(ALCcontext *ctx)
+{
+    auto *ring = ctx->mAsyncEvents.get();
+    auto evt_span = ring->getWriteVector()[0];
+    if(evt_span.empty())
+    {
+        do {
+            std::this_thread::yield();
+            evt_span = ring->getWriteVector()[0];
+        } while(evt_span.empty());
+    }
+    std::ignore = InitAsyncEvent<AsyncKillThread>(evt_span[0]);
+    ring->writeAdvance(1);
+
+    if(ctx->mEventThread.joinable())
+    {
+        ctx->mEventsPending.store(true, std::memory_order_release);
+        ctx->mEventsPending.notify_all();
+        ctx->mEventThread.join();
+    }
+}
+
+AL_API DECL_FUNCEXT3(void, alEventControl,SOFT, ALsizei,count, const ALenum*,types, ALboolean,enable)
+AL_API DECL_FUNCEXT2(void, alEventCallback,SOFT, ALEVENTPROCSOFT,callback, void*,userParam)

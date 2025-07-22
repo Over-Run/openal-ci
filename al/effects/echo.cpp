@@ -20,20 +20,19 @@ namespace {
 static_assert(EchoMaxDelay >= AL_ECHO_MAX_DELAY, "Echo max delay too short");
 static_assert(EchoMaxLRDelay >= AL_ECHO_MAX_LRDELAY, "Echo max left-right delay too short");
 
-constexpr EffectProps genDefaultProps() noexcept
+consteval auto genDefaultProps() noexcept -> EffectProps
 {
-    EchoProps props{};
-    props.Delay    = AL_ECHO_DEFAULT_DELAY;
-    props.LRDelay  = AL_ECHO_DEFAULT_LRDELAY;
-    props.Damping  = AL_ECHO_DEFAULT_DAMPING;
-    props.Feedback = AL_ECHO_DEFAULT_FEEDBACK;
-    props.Spread   = AL_ECHO_DEFAULT_SPREAD;
-    return props;
+    return EchoProps{
+        .Delay    = AL_ECHO_DEFAULT_DELAY,
+        .LRDelay  = AL_ECHO_DEFAULT_LRDELAY,
+        .Damping  = AL_ECHO_DEFAULT_DAMPING,
+        .Feedback = AL_ECHO_DEFAULT_FEEDBACK,
+        .Spread   = AL_ECHO_DEFAULT_SPREAD};
 }
 
 } // namespace
 
-const EffectProps EchoEffectProps{genDefaultProps()};
+constinit const EffectProps EchoEffectProps(genDefaultProps());
 
 void EchoEffectHandler::SetParami(ALCcontext *context, EchoProps&, ALenum param, int)
 { context->throw_error(AL_INVALID_ENUM, "Invalid echo integer property {:#04x}", as_unsigned(param)); }
@@ -175,17 +174,15 @@ struct AllValidator {
 
 } // namespace
 
-template<>
+template<> /* NOLINTNEXTLINE(clazy-copyable-polymorphic) Exceptions must be copyable. */
 struct EchoCommitter::Exception : public EaxException {
-    explicit Exception(const char* message) : EaxException{"EAX_ECHO_EFFECT", message}
+    explicit Exception(const std::string_view message) : EaxException{"EAX_ECHO_EFFECT", message}
     { }
 };
 
-template<>
-[[noreturn]] void EchoCommitter::fail(const char *message)
-{
-    throw Exception{message};
-}
+template<> [[noreturn]]
+void EchoCommitter::fail(const std::string_view message)
+{ throw Exception{message}; }
 
 bool EaxEchoCommitter::commit(const EAXECHOPROPERTIES &props)
 {
@@ -193,32 +190,24 @@ bool EaxEchoCommitter::commit(const EAXECHOPROPERTIES &props)
         return false;
 
     mEaxProps = props;
-    mAlProps = [&]{
-        EchoProps ret{};
-        ret.Delay = props.flDelay;
-        ret.LRDelay = props.flLRDelay;
-        ret.Damping = props.flDamping;
-        ret.Feedback = props.flFeedback;
-        ret.Spread = props.flSpread;
-        return ret;
-    }();
+    mAlProps = EchoProps{
+        .Delay = props.flDelay,
+        .LRDelay = props.flLRDelay,
+        .Damping = props.flDamping,
+        .Feedback = props.flFeedback,
+        .Spread = props.flSpread};
 
     return true;
 }
 
 void EaxEchoCommitter::SetDefaults(EaxEffectProps &props)
 {
-    static constexpr EAXECHOPROPERTIES defprops{[]
-    {
-        EAXECHOPROPERTIES ret{};
-        ret.flDelay = EAXECHO_DEFAULTDELAY;
-        ret.flLRDelay = EAXECHO_DEFAULTLRDELAY;
-        ret.flDamping = EAXECHO_DEFAULTDAMPING;
-        ret.flFeedback = EAXECHO_DEFAULTFEEDBACK;
-        ret.flSpread = EAXECHO_DEFAULTSPREAD;
-        return ret;
-    }()};
-    props = defprops;
+    props = EAXECHOPROPERTIES{
+        .flDelay = EAXECHO_DEFAULTDELAY,
+        .flLRDelay = EAXECHO_DEFAULTLRDELAY,
+        .flDamping = EAXECHO_DEFAULTDAMPING,
+        .flFeedback = EAXECHO_DEFAULTFEEDBACK,
+        .flSpread = EAXECHO_DEFAULTSPREAD};
 }
 
 void EaxEchoCommitter::Get(const EaxCall &call, const EAXECHOPROPERTIES &props)
@@ -226,12 +215,12 @@ void EaxEchoCommitter::Get(const EaxCall &call, const EAXECHOPROPERTIES &props)
     switch(call.get_property_id())
     {
     case EAXECHO_NONE: break;
-    case EAXECHO_ALLPARAMETERS: call.set_value<Exception>(props); break;
-    case EAXECHO_DELAY: call.set_value<Exception>(props.flDelay); break;
-    case EAXECHO_LRDELAY: call.set_value<Exception>(props.flLRDelay); break;
-    case EAXECHO_DAMPING: call.set_value<Exception>(props.flDamping); break;
-    case EAXECHO_FEEDBACK: call.set_value<Exception>(props.flFeedback); break;
-    case EAXECHO_SPREAD: call.set_value<Exception>(props.flSpread); break;
+    case EAXECHO_ALLPARAMETERS: call.store(props); break;
+    case EAXECHO_DELAY: call.store(props.flDelay); break;
+    case EAXECHO_LRDELAY: call.store(props.flLRDelay); break;
+    case EAXECHO_DAMPING: call.store(props.flDamping); break;
+    case EAXECHO_FEEDBACK: call.store(props.flFeedback); break;
+    case EAXECHO_SPREAD: call.store(props.flSpread); break;
     default: fail_unknown_property_id();
     }
 }

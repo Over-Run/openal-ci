@@ -120,8 +120,8 @@ struct DedicatedStateFactory final : public EffectStateFactory {
 
 } // namespace
 
-EffectStateFactory *DedicatedStateFactory_getFactory()
+auto DedicatedStateFactory_getFactory() -> gsl::strict_not_null<EffectStateFactory*>
 {
     static DedicatedStateFactory DedicatedFactory{};
-    return &DedicatedFactory;
+    return gsl::make_not_null(&DedicatedFactory);
 }

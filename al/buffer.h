@@ -18,6 +18,7 @@
 #include "almalloc.h"
 #include "alnumeric.h"
 #include "core/buffer_storage.h"
+#include "gsl/gsl"
 #include "intrusive_ptr.h"
 #include "vector.h"
 
@@ -70,7 +71,8 @@ struct ALbuffer : public BufferStorage {
         return al::intrusive_ptr{this};
     }
 
-    static void SetName(ALCcontext *context, ALuint id, std::string_view name);
+    static void SetName(gsl::strict_not_null<ALCcontext*> context, ALuint id,
+        std::string_view name);
 
     DISABLE_ALLOC
 

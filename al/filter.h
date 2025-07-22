@@ -13,6 +13,7 @@
 
 #include "almalloc.h"
 #include "alnumeric.h"
+#include "gsl/gsl"
 
 struct ALfilter;
 
@@ -22,15 +23,15 @@ inline constexpr float HighPassFreqRef{250.0f};
 
 template<typename T>
 struct FilterTable {
-    static void setParami(ALCcontext*, ALfilter*, ALenum, int);
-    static void setParamiv(ALCcontext*, ALfilter*, ALenum, const int*);
-    static void setParamf(ALCcontext*, ALfilter*, ALenum, float);
-    static void setParamfv(ALCcontext*, ALfilter*, ALenum, const float*);
+    static void setParami(gsl::strict_not_null<ALCcontext*>, gsl::strict_not_null<ALfilter*>, ALenum, int);
+    static void setParamiv(gsl::strict_not_null<ALCcontext*>, gsl::strict_not_null<ALfilter*>, ALenum, const int*);
+    static void setParamf(gsl::strict_not_null<ALCcontext*>, gsl::strict_not_null<ALfilter*>, ALenum, float);
+    static void setParamfv(gsl::strict_not_null<ALCcontext*>, gsl::strict_not_null<ALfilter*>, ALenum, const float*);
 
-    static void getParami(ALCcontext*, const ALfilter*, ALenum, int*);
-    static void getParamiv(ALCcontext*, const ALfilter*, ALenum, int*);
-    static void getParamf(ALCcontext*, const ALfilter*, ALenum, float*);
-    static void getParamfv(ALCcontext*, const ALfilter*, ALenum, float*);
+    static void getParami(gsl::strict_not_null<ALCcontext*>, gsl::strict_not_null<const ALfilter*>, ALenum, int*);
+    static void getParamiv(gsl::strict_not_null<ALCcontext*>, gsl::strict_not_null<const ALfilter*>, ALenum, int*);
+    static void getParamf(gsl::strict_not_null<ALCcontext*>, gsl::strict_not_null<const ALfilter*>, ALenum, float*);
+    static void getParamfv(gsl::strict_not_null<ALCcontext*>, gsl::strict_not_null<const ALfilter*>, ALenum, float*);
 
 private:
     FilterTable() = default;
@@ -59,7 +60,8 @@ struct ALfilter {
     /* Self ID */
     ALuint id{0};
 
-    static void SetName(ALCcontext *context, ALuint id, std::string_view name);
+    static void SetName(gsl::strict_not_null<ALCcontext*> context, ALuint id,
+        std::string_view name);
 
     DISABLE_ALLOC
 };

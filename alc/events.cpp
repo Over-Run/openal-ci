@@ -10,6 +10,7 @@
 #include "core/logging.h"
 #include "device.h"
 #include "fmt/core.h"
+#include "gsl/gsl"
 
 
 namespace {
@@ -41,12 +42,14 @@ auto GetEventType(ALCenum type) -> std::optional<alc::EventType>
     return std::nullopt;
 }
 
-void Event(EventType eventType, DeviceType deviceType, ALCdevice *device, std::string_view message) noexcept
+void Event(EventType eventType, DeviceType deviceType, ALCdevice *device, std::string_view message)
+    noexcept
 {
     auto eventlock = std::unique_lock{EventMutex};
     if(EventCallback && EventsEnabled.test(al::to_underlying(eventType)))
         EventCallback(EnumFromEventType(eventType), al::to_underlying(deviceType), device,
-            static_cast<ALCsizei>(message.length()), message.data(), EventUserPtr);
+            /* NOLINTNEXTLINE(bugprone-suspicious-stringview-data-usage) */
+            gsl::narrow_cast<ALCsizei>(message.size()), message.data(), EventUserPtr);
 }
 
 } // namespace alc

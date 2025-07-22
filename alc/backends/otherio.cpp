@@ -63,8 +63,9 @@
 #include "core/device.h"
 #include "core/helpers.h"
 #include "core/logging.h"
+#include "gsl/gsl"
 #include "pragmadefs.h"
-#include "strutils.h"
+#include "strutils.hpp"
 
 
 /* A custom C++ interface that should be capable of interoperating with ASIO
@@ -94,7 +95,7 @@ struct ORIO64Bit {
 template<> [[nodiscard]]
 auto ORIO64Bit::as() const -> uint64_t { return (uint64_t{hi}<<32) | lo; }
 template<> [[nodiscard]]
-auto ORIO64Bit::as() const -> int64_t { return static_cast<int64_t>(as<uint64_t>()); }
+auto ORIO64Bit::as() const -> int64_t { return as_signed(as<uint64_t>()); }
 template<> [[nodiscard]]
 auto ORIO64Bit::as() const -> double { return std::bit_cast<double>(as<uint64_t>()); }
 
@@ -272,7 +273,7 @@ auto PopulateDeviceList() -> HRESULT
     auto keyname = std::vector<WCHAR>(maxkeylen*2 + 1);
     for(DWORD i{0};i < numkeys;++i)
     {
-        auto namelen = static_cast<DWORD>(keyname.size());
+        auto namelen = gsl::narrow_cast<DWORD>(keyname.size());
         res = RegEnumKeyExW(regbase.get(), i, keyname.data(), &namelen, nullptr, nullptr, nullptr,
             nullptr);
         if(res != ERROR_SUCCESS)
@@ -404,7 +405,7 @@ struct OtherIOProxy {
 
         explicit operator bool() const noexcept { return mType != MsgType::QuitThread; }
     };
-    static inline std::deque<Msg> mMsgQueue;
+    static inline std::deque<Msg> mMsgQueue; /* NOLINT(cert-err58-cpp) */
     static inline std::mutex mMsgQueueLock;
     static inline std::condition_variable mMsgQueueCond;
 
@@ -458,7 +459,7 @@ void OtherIOProxy::messageHandler(std::promise<HRESULT> *promise)
     while(Msg msg{popMessage()})
     {
         TRACE("Got message \"{}\" ({:#04x}, this={}, param=\"{}\")",
-            GetMessageTypeName(msg.mType), static_cast<uint>(msg.mType),
+            GetMessageTypeName(msg.mType), al::to_underlying(msg.mType),
             static_cast<void*>(msg.mProxy), msg.mParam);
 
         switch(msg.mType)
@@ -570,9 +571,8 @@ void OtherIOPlayback::open(std::string_view name)
         name = gDeviceList[0].mDrvName;
     else
     {
-        auto iter = std::find_if(gDeviceList.cbegin(), gDeviceList.cend(),
-            [name](const DeviceEntry &entry) { return entry.mDrvName == name; });
-        if(iter == gDeviceList.cend())
+        auto iter = std::ranges::find(gDeviceList, name, &DeviceEntry::mDrvName);
+        if(iter == gDeviceList.end())
             throw al::backend_exception{al::backend_error::NoDevice,
                 "Device name \"{}\" not found", name};
     }

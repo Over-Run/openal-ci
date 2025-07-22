@@ -123,8 +123,8 @@ void ChorusState::update(const ContextBase *context, const EffectSlot *slot,
     /* The LFO depth is scaled to be relative to the sample delay. Clamp the
      * delay and depth to allow enough padding for resampling.
      */
-    const auto *device = context->mDevice;
-    const auto frequency = static_cast<float>(device->mSampleRate);
+    auto const device = al::get_not_null(context->mDevice);
+    auto const frequency = static_cast<float>(device->mSampleRate);
 
     mWaveform = props.Waveform;
 
@@ -318,8 +318,8 @@ struct ChorusStateFactory final : public EffectStateFactory {
 
 } // namespace
 
-EffectStateFactory *ChorusStateFactory_getFactory()
+auto ChorusStateFactory_getFactory() -> gsl::strict_not_null<EffectStateFactory*>
 {
     static ChorusStateFactory ChorusFactory{};
-    return &ChorusFactory;
+    return gsl::make_not_null(&ChorusFactory);
 }

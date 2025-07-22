@@ -62,7 +62,7 @@ constexpr auto StftStep = StftSize / OversampleFactor;
 struct Windower {
     alignas(16) std::array<float,StftSize> mData{};
 
-    Windower()
+    Windower() noexcept
     {
         static constexpr auto scale = std::numbers::pi / double{StftSize};
         /* Create lookup table of the Hann window for the desired size. */
@@ -327,8 +327,8 @@ struct PshifterStateFactory final : public EffectStateFactory {
 
 } // namespace
 
-EffectStateFactory *PshifterStateFactory_getFactory()
+auto PshifterStateFactory_getFactory() -> gsl::strict_not_null<EffectStateFactory*>
 {
     static PshifterStateFactory PshifterFactory{};
-    return &PshifterFactory;
+    return gsl::make_not_null(&PshifterFactory);
 }

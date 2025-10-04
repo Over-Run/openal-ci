@@ -90,6 +90,7 @@ jobs:
       #     sudo apt-get update || true
       - name: Prepare cross-compilation
         run: |
+          echo "APT::Architecture \"${{matrix.CROSS_ARCH}};\"" | sudo tee -a /etc/apt/apt.conf
           sudo dpkg --add-architecture ${{matrix.CROSS_ARCH}}
           sudo apt-get update || true
 
@@ -128,7 +129,7 @@ jobs:
           memory: 4G
           shell: bash
           run: |
-            sudo pkg install -y cmake pkgconf gmake alsa-lib pulseaudio portaudio jackit dbus pipewire
+            sudo pkg install -y llvm21 cmake pkgconf gmake alsa-lib pulseaudio portaudio jackit dbus pipewire
             cmake -B build -DALSOFT_REQUIRE_RTKIT=ON -DALSOFT_REQUIRE_ALSA=ON -DALSOFT_REQUIRE_OSS=ON -DALSOFT_REQUIRE_PORTAUDIO=ON -DALSOFT_REQUIRE_PULSEAUDIO=ON -DALSOFT_REQUIRE_JACK=ON -DALSOFT_REQUIRE_PIPEWIRE=ON -DALSOFT_EMBED_HRTF_DATA=YES -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS="-U_FORTIFY_SOURCE -D_FORTIF=Y_SOURCE=0"
             cmake --build build --parallel
             strip build/libopenal.so

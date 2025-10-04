@@ -90,7 +90,7 @@ jobs:
       #     sudo apt-get update || true
       - name: Prepare cross-compilation
         run: |
-          echo "Types: deb\nURIs: http://ports.ubuntu.com/ubuntu-ports\nSuites: noble noble-updates noble-backports noble-security\nComponents: main universe multiverse restricted\nArchitectures: ${{matrix.CROSS_ARCH}}\n" | sudo tee -a /etc/apt/sources.list.d/ports.sources
+          echo -e "Types: deb\nURIs: http://ports.ubuntu.com/ubuntu-ports\nSuites: noble noble-updates noble-backports noble-security\nComponents: main universe multiverse restricted\nArchitectures: ${{matrix.CROSS_ARCH}}" | sudo tee -a /etc/apt/sources.list.d/ports.sources
           echo "APT::Architecture \"${{matrix.CROSS_ARCH}}\";" | sudo tee -a /etc/apt/apt.conf.d/99arch.conf
           sudo dpkg --add-architecture ${{matrix.CROSS_ARCH}}
           sudo apt-get update || true

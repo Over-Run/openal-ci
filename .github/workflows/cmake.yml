@@ -88,14 +88,12 @@ jobs:
       #     sudo sed -i 's#^deb http://[^ ]\+#deb [arch=${{matrix.CROSS_ARCH}}] http://ports.ubuntu.com/ubuntu-ports/#' /etc/apt/sources.list.d/ports.list
       #     sudo dpkg --add-architecture ${{matrix.CROSS_ARCH}}
       #     sudo apt-get update || true
-      - name: Upload apt.conf
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-${{matrix.ARCH}}-apt-conf
-          path: /etc/apt/apt.conf
+      - name: inspect files
+        run: |
+          ls -l /etc/apt/apt.conf.d/
       - name: Prepare cross-compilation
         run: |
-          echo "APT::Architectures { \"${{matrix.CROSS_ARCH}}\" };" | sudo tee -a /etc/apt/apt.conf
+          echo "APT::Architecture \"${{matrix.CROSS_ARCH}}\";" | sudo tee -a /etc/apt/apt.conf.d/99arch.conf
           sudo dpkg --add-architecture ${{matrix.CROSS_ARCH}}
           sudo apt-get update || true
       - name: Install cross-compilation dependencies
@@ -130,12 +128,12 @@ jobs:
           operating_system: freebsd
           architecture: x86-64
           version: '14.3'
-          memory: 4G
+          memory: 6G
           shell: bash
           run: |
             sudo pkg install -y llvm20 cmake pkgconf gmake alsa-lib pulseaudio portaudio jackit dbus pipewire
             cmake -B build -DALSOFT_REQUIRE_RTKIT=ON -DALSOFT_REQUIRE_ALSA=ON -DALSOFT_REQUIRE_OSS=ON -DALSOFT_REQUIRE_PORTAUDIO=ON -DALSOFT_REQUIRE_PULSEAUDIO=ON -DALSOFT_REQUIRE_JACK=ON -DALSOFT_REQUIRE_PIPEWIRE=ON -DALSOFT_EMBED_HRTF_DATA=YES -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS="-U_FORTIFY_SOURCE -D_FORTIF=Y_SOURCE=0"
-            cmake --build build --parallel
+            cmake --build build --parallel 2
             strip build/libopenal.so
       - name: Upload artifact
         uses: actions/upload-artifact@v4

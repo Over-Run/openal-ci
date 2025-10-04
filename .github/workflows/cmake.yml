@@ -44,7 +44,7 @@ jobs:
 
   linux-cross:
     name: Linux Cross
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
@@ -115,11 +115,11 @@ jobs:
         with:
           fetch-depth: 3
       - name: Build
-        uses: cross-platform-actions/action@v0.26.0
+        uses: cross-platform-actions/action@v0.29.0
         with:
           operating_system: freebsd
           architecture: x86-64
-          version: '13.3'
+          version: '14.3'
           memory: 4G
           shell: bash
           run: |
@@ -143,7 +143,7 @@ jobs:
         ARCH: [x64, arm64]
         include:
           - ARCH: x64
-            CMAKE_PARAMS: -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 -DCMAKE_OSX_ARCHITECTURES=x86_64
+            CMAKE_PARAMS: -DCMAKE_OSX_DEPLOYMENT_TARGET=13.3 -DCMAKE_OSX_ARCHITECTURES=x86_64
           - ARCH: arm64
             CMAKE_PARAMS: -DCMAKE_OSX_DEPLOYMENT_TARGET=13.3 -DCMAKE_OSX_ARCHITECTURES=arm64
     steps:

@@ -163,7 +163,7 @@ void ALCossListAppend(std::vector<DevMap> &list, std::string_view handle, std::s
     while(std::ranges::find(list, newname, &DevMap::name) != list.end())
         newname = std::format("{} #{}", handle, ++count);
 
-    const auto &entry = list.emplace_back(std::move(newname), path);
+    const auto &entry = list.emplace_back(std::move(newname), std::string(path));
     TRACE("Got device \"{}\", \"{}\"", entry.name, entry.device_name);
 }
 

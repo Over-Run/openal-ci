@@ -88,6 +88,11 @@ jobs:
       #     sudo sed -i 's#^deb http://[^ ]\+#deb [arch=${{matrix.CROSS_ARCH}}] http://ports.ubuntu.com/ubuntu-ports/#' /etc/apt/sources.list.d/ports.list
       #     sudo dpkg --add-architecture ${{matrix.CROSS_ARCH}}
       #     sudo apt-get update || true
+      - name: upload sources.list
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{matrix.ARCH}}-sources
+          path: /etc/apt/sources.list
       
       - name: step 1
         run: sudo grep 'deb http' /etc/apt/sources.list | sudo tee /etc/apt/sources.list.d/ports.list

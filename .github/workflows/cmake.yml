@@ -88,16 +88,13 @@ jobs:
       #     sudo sed -i 's#^deb http://[^ ]\+#deb [arch=${{matrix.CROSS_ARCH}}] http://ports.ubuntu.com/ubuntu-ports/#' /etc/apt/sources.list.d/ports.list
       #     sudo dpkg --add-architecture ${{matrix.CROSS_ARCH}}
       #     sudo apt-get update || true
-      - name: inspect files
-        run: |
-          ls -l /etc/apt/apt.conf.d/
       - name: Prepare cross-compilation
         run: |
           echo "APT::Architecture \"${{matrix.CROSS_ARCH}}\";" | sudo tee -a /etc/apt/apt.conf.d/99arch.conf
           sudo dpkg --add-architecture ${{matrix.CROSS_ARCH}}
           sudo apt-get update || true
       - name: Install cross-compilation dependencies
-        run: DEBIAN_FRONTEND=noninteractive sudo apt-get -yq --allow-unauthenticated install libpulse-dev:${{matrix.CROSS_ARCH}} portaudio19-dev:${{matrix.CROSS_ARCH}} libasound2-dev:${{matrix.CROSS_ARCH}} libjack-dev:${{matrix.CROSS_ARCH}} libdbus-1-dev:${{matrix.CROSS_ARCH}} -o Dpkg::Options::="--force-overwrite"
+        run: DEBIAN_FRONTEND=noninteractive sudo apt-get -yq --allow-unauthenticated install libpulse-dev portaudio19-dev libasound2-dev libjack-dev libdbus-1-dev -o Dpkg::Options::="--force-overwrite"
         #libpipewire-0.3-dev:${{matrix.CROSS_ARCH}}
       - name: Configure build
         run: CC=${{matrix.TRIPLET}}-gcc CXX=${{matrix.TRIPLET}}-g++ cmake -B build -DALSOFT_REQUIRE_RTKIT=ON -DALSOFT_REQUIRE_ALSA=ON -DALSOFT_REQUIRE_OSS=ON -DALSOFT_REQUIRE_PORTAUDIO=ON -DALSOFT_REQUIRE_PULSEAUDIO=ON -DALSOFT_REQUIRE_JACK=ON -DALSOFT_EMBED_HRTF_DATA=YES -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS="-U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0" -DCMAKE_TOOLCHAIN_FILE=../XCompile-Linux.txt -DHOST=${{matrix.TRIPLET}} ${{matrix.CMAKE_PARAMS}}

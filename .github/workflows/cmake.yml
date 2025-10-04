@@ -88,22 +88,10 @@ jobs:
       #     sudo sed -i 's#^deb http://[^ ]\+#deb [arch=${{matrix.CROSS_ARCH}}] http://ports.ubuntu.com/ubuntu-ports/#' /etc/apt/sources.list.d/ports.list
       #     sudo dpkg --add-architecture ${{matrix.CROSS_ARCH}}
       #     sudo apt-get update || true
-      - name: upload sources.list
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-${{matrix.ARCH}}-sources
-          path: /etc/apt/sources.list
-      
-      - name: step 1
-        run: sudo grep 'deb http' /etc/apt/sources.list | sudo tee /etc/apt/sources.list.d/ports.list
-      - name: step 2
-        run: sudo sed -i 's/^deb http/deb [arch=amd64] http/' /etc/apt/sources.list
-      - name: step 3
-        run: sudo sed -i 's#^deb http://[^ ]\+#deb [arch=${{matrix.CROSS_ARCH}}] http://ports.ubuntu.com/ubuntu-ports/#' /etc/apt/sources.list.d/ports.list
-      - name: step 4
-        run: sudo dpkg --add-architecture ${{matrix.CROSS_ARCH}}
-      - name: step 5
-        run: sudo apt-get update || true
+      - name: Prepare cross-compilation
+        run: |
+          sudo dpkg --add-architecture ${{matrix.CROSS_ARCH}}
+          sudo apt-get update || true
 
       - name: Install cross-compilation dependencies
         run: DEBIAN_FRONTEND=noninteractive sudo apt-get -yq --allow-unauthenticated install libpulse-dev:${{matrix.CROSS_ARCH}} portaudio19-dev:${{matrix.CROSS_ARCH}} libasound2-dev:${{matrix.CROSS_ARCH}} libjack-dev:${{matrix.CROSS_ARCH}} libdbus-1-dev:${{matrix.CROSS_ARCH}} -o Dpkg::Options::="--force-overwrite"

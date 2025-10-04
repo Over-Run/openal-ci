@@ -211,7 +211,7 @@ done:
     const char *defdev{((type_flag==DSP_CAP_INPUT) ? DefaultCapture : DefaultPlayback).c_str()};
     auto iter = std::ranges::find(devlist, defdev, &DevMap::device_name);
     if(iter == devlist.end())
-        devlist.insert(devlist.begin(), DevMap{GetDefaultName(), defdev});
+        devlist.insert(devlist.begin(), DevMap{std::string(GetDefaultName()), defdev});
     else
     {
         auto entry = DevMap{std::move(*iter)};

@@ -47,6 +47,7 @@
 #include "core/device.h"
 #include "core/helpers.h"
 #include "core/logging.h"
+#include "gsl/gsl"
 
 #include <sys/audioio.h>
 
@@ -61,7 +62,7 @@ std::string solaris_driver{"/dev/audio"};
 
 
 struct SolarisBackend final : public BackendBase {
-    explicit SolarisBackend(DeviceBase *device) noexcept : BackendBase{device} { }
+    explicit SolarisBackend(gsl::not_null<DeviceBase*> device) noexcept : BackendBase{device} { }
     ~SolarisBackend() override;
 
     int mixerProc();
@@ -118,7 +119,7 @@ int SolarisBackend::mixerProc()
         }
 
         auto buffer = std::span{mBuffer};
-        mDevice->renderSamples(buffer.data(), static_cast<uint>(buffer.size()/frame_size),
+        mDevice->renderSamples(buffer.data(), gsl::narrow_cast<uint>(buffer.size()/frame_size),
             frame_step);
         while(!buffer.empty() && !mKillNow.load(std::memory_order_acquire))
         {
@@ -132,7 +133,7 @@ int SolarisBackend::mixerProc()
                 break;
             }
 
-            buffer = buffer.subspan(static_cast<size_t>(wrote));
+            buffer = buffer.subspan(gsl::narrow_cast<size_t>(wrote));
         }
     }
 
@@ -291,7 +292,8 @@ auto SolarisBackendFactory::enumerate(BackendType type) -> std::vector<std::stri
     return {};
 }
 
-BackendPtr SolarisBackendFactory::createBackend(DeviceBase *device, BackendType type)
+auto SolarisBackendFactory::createBackend(gsl::not_null<DeviceBase*> device, BackendType type)
+    -> BackendPtr
 {
     if(type == BackendType::Playback)
         return BackendPtr{new SolarisBackend{device}};

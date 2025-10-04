@@ -5,21 +5,24 @@
 
 #include <array>
 #include <atomic>
-#include <cstddef>
 #include <cstdint>
 #include <string_view>
 #include <utility>
 #include <variant>
 
 #include "AL/al.h"
-#include "AL/alc.h"
 
 #include "alc/inprogext.h"
 #include "almalloc.h"
 #include "alnumeric.h"
 #include "core/buffer_storage.h"
+#include "gsl/gsl"
 #include "intrusive_ptr.h"
 #include "vector.h"
+
+namespace al {
+struct Context;
+} // namespace al
 
 #if ALSOFT_EAX
 enum class EaxStorage : uint8_t {
@@ -70,7 +73,7 @@ struct ALbuffer : public BufferStorage {
         return al::intrusive_ptr{this};
     }
 
-    static void SetName(ALCcontext *context, ALuint id, std::string_view name);
+    static void SetName(gsl::not_null<al::Context*> context, ALuint id, std::string_view name);
 
     DISABLE_ALLOC
 

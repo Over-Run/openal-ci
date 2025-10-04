@@ -35,6 +35,7 @@
 #include "core/device.h"
 #include "core/helpers.h"
 #include "core/logging.h"
+#include "gsl/gsl"
 #include "ringbuffer.h"
 
 #include <sndio.h>
@@ -53,7 +54,7 @@ struct SioPar : public sio_par {
 };
 
 struct SndioPlayback final : public BackendBase {
-    explicit SndioPlayback(DeviceBase *device) noexcept : BackendBase{device} { }
+    explicit SndioPlayback(gsl::not_null<DeviceBase*> device) noexcept : BackendBase{device} { }
     ~SndioPlayback() override;
 
     int mixerProc();
@@ -92,11 +93,11 @@ int SndioPlayback::mixerProc()
     {
         auto buffer = std::span{mBuffer};
 
-        mDevice->renderSamples(buffer.data(), static_cast<uint>(buffer.size() / frameSize),
+        mDevice->renderSamples(buffer.data(), gsl::narrow_cast<uint>(buffer.size() / frameSize),
             frameStep);
         while(!buffer.empty() && !mKillNow.load(std::memory_order_acquire))
         {
-            size_t wrote{sio_write(mSndHandle, buffer.data(), buffer.size())};
+            const auto wrote = sio_write(mSndHandle, buffer.data(), buffer.size());
             if(wrote > buffer.size() || wrote == 0)
             {
                 ERR("sio_write failed: {:#x}", wrote);
@@ -269,20 +270,20 @@ void SndioPlayback::stop()
  * capture buffer sizes apps may request.
  */
 struct SndioCapture final : public BackendBase {
-    explicit SndioCapture(DeviceBase *device) noexcept : BackendBase{device} { }
+    explicit SndioCapture(gsl::not_null<DeviceBase*> device) noexcept : BackendBase{device} { }
     ~SndioCapture() override;
 
-    int recordProc();
+    void recordProc();
 
     void open(std::string_view name) override;
     void start() override;
     void stop() override;
-    void captureSamples(std::byte *buffer, uint samples) override;
+    void captureSamples(std::span<std::byte> outbuffer) override;
     uint availableSamples() override;
 
     sio_hdl *mSndHandle{nullptr};
 
-    RingBuffer2Ptr<std::byte> mRing;
+    RingBufferPtr<std::byte> mRing;
 
     std::atomic<bool> mKillNow{true};
     std::thread mThread;
@@ -295,33 +296,33 @@ SndioCapture::~SndioCapture()
     mSndHandle = nullptr;
 }
 
-int SndioCapture::recordProc()
+void SndioCapture::recordProc()
 {
     SetRTPriority();
     althrd_setname(GetRecordThreadName());
 
     const uint frameSize{mDevice->frameSizeFromFmt()};
 
-    int nfds_pre{sio_nfds(mSndHandle)};
+    const auto nfds_pre = sio_nfds(mSndHandle);
     if(nfds_pre <= 0)
     {
         mDevice->handleDisconnect("Incorrect return value from sio_nfds(): {}", nfds_pre);
-        return 1;
+        return;
     }
 
-    auto fds = std::vector<pollfd>(static_cast<uint>(nfds_pre));
+    auto fds = std::vector<pollfd>(gsl::narrow_cast<uint>(nfds_pre));
 
     while(!mKillNow.load(std::memory_order_acquire)
         && mDevice->Connected.load(std::memory_order_acquire))
     {
         /* Wait until there's some samples to read. */
-        const int nfds{sio_pollfd(mSndHandle, fds.data(), POLLIN)};
+        const auto nfds = sio_pollfd(mSndHandle, fds.data(), POLLIN);
         if(nfds <= 0)
         {
             mDevice->handleDisconnect("Failed to get polling fds: {}", nfds);
             break;
         }
-        int pollres{::poll(fds.data(), fds.size(), 2000)};
+        const auto pollres = ::poll(fds.data(), fds.size(), 2000);
         if(pollres < 0)
         {
             if(errno == EINTR) continue;
@@ -331,7 +332,7 @@ int SndioCapture::recordProc()
         if(pollres == 0)
             continue;
 
-        const int revents{sio_revents(mSndHandle, fds.data())};
+        const auto revents = sio_revents(mSndHandle, fds.data());
         if((revents&POLLHUP))
         {
             mDevice->handleDisconnect("Got POLLHUP from poll events");
@@ -343,7 +344,7 @@ int SndioCapture::recordProc()
         auto buffer = mRing->getWriteVector()[0];
         while(!buffer.empty())
         {
-            auto got = sio_read(mSndHandle, buffer.data(), buffer.size());
+            const auto got = sio_read(mSndHandle, buffer.data(), buffer.size());
             if(got == 0)
                 break;
             if(got > buffer.size())
@@ -361,12 +362,10 @@ int SndioCapture::recordProc()
         if(buffer.empty())
         {
             /* Got samples to read, but no place to store it. Drop it. */
-            static std::array<char,4096> junk;
+            static auto junk = std::array<char,4096>{};
             sio_read(mSndHandle, junk.data(), junk.size() - (junk.size()%frameSize));
         }
     }
-
-    return 0;
 }
 
 
@@ -449,8 +448,8 @@ void SndioCapture::open(std::string_view name)
             DevFmtTypeString(mDevice->FmtType), DevFmtChannelsString(mDevice->FmtChans),
             mDevice->mSampleRate, par.sig?'s':'u', par.bps*8, par.rchan, par.rate};
 
-    mRing = RingBuffer2<std::byte>::Create(mDevice->mBufferSize, size_t{par.bps}*par.rchan, false);
-    mDevice->mBufferSize = static_cast<uint>(mRing->writeSpace());
+    mRing = RingBuffer<std::byte>::Create(mDevice->mBufferSize, size_t{par.bps}*par.rchan, false);
+    mDevice->mBufferSize = gsl::narrow_cast<uint>(mRing->writeSpace());
     mDevice->mUpdateSize = par.round;
 
     setDefaultChannelOrder();
@@ -484,11 +483,11 @@ void SndioCapture::stop()
         ERR("Error stopping device");
 }
 
-void SndioCapture::captureSamples(std::byte *buffer, uint samples)
-{ std::ignore = mRing->read(std::span{buffer, samples*mRing->getElemSize()}); }
+void SndioCapture::captureSamples(std::span<std::byte> outbuffer)
+{ std::ignore = mRing->read(outbuffer); }
 
-uint SndioCapture::availableSamples()
-{ return static_cast<uint>(mRing->readSpace()); }
+auto SndioCapture::availableSamples() -> uint
+{ return gsl::narrow_cast<uint>(mRing->readSpace()); }
 
 } // namespace
 
@@ -515,7 +514,8 @@ auto SndIOBackendFactory::enumerate(BackendType type) -> std::vector<std::string
     return {};
 }
 
-BackendPtr SndIOBackendFactory::createBackend(DeviceBase *device, BackendType type)
+auto SndIOBackendFactory::createBackend(gsl::not_null<DeviceBase*> device, BackendType type)
+    -> BackendPtr
 {
     if(type == BackendType::Playback)
         return BackendPtr{new SndioPlayback{device}};

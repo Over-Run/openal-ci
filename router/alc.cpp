@@ -15,12 +15,25 @@
 #include <tuple>
 #include <unordered_map>
 
-#include "AL/alc.h"
-
 #include "alnumeric.h"
 #include "alstring.h"
+#include "strutils.hpp"
+
+#if HAVE_CXXMODULES
+import alsoft.router;
+import gsl;
+import openal;
+
+#define ALC_APIENTRY __cdecl
+
+#else
+
+#include "AL/alc.h"
+#include "AL/al.h"
+#include "AL/alext.h"
+#include "gsl/gsl"
 #include "router.h"
-#include "strutils.h"
+#endif
 
 
 namespace {
@@ -62,6 +75,10 @@ const auto alcFunctions = std::array{
 
     DECL(alcSetThreadContext),
     DECL(alcGetThreadContext),
+
+    DECL(alcLoopbackOpenDeviceSOFT),
+    DECL(alcIsRenderFormatSupportedSOFT),
+    DECL(alcRenderSamplesSOFT),
 
     DECL(alEnable),
     DECL(alDisable),
@@ -181,7 +198,6 @@ struct EnumExportEntry {
 };
 #define DECL(x) EnumExportEntry{ #x##sv, (x) }
 constexpr auto alcEnumerations = std::array{
-    DECL(ALC_INVALID),
     DECL(ALC_FALSE),
     DECL(ALC_TRUE),
 
@@ -210,7 +226,7 @@ constexpr auto alcEnumerations = std::array{
     DECL(ALC_INVALID_VALUE),
     DECL(ALC_OUT_OF_MEMORY),
 
-    DECL(AL_INVALID),
+    EnumExportEntry{ "AL_INVALID"sv, -1 }, /* Deprecated enum */
     DECL(AL_NONE),
     DECL(AL_FALSE),
     DECL(AL_TRUE),
@@ -289,16 +305,16 @@ constexpr auto alcEnumerations = std::array{
 };
 #undef DECL
 
-[[nodiscard]] constexpr auto GetNoErrorString() noexcept { return "No Error"; }
-[[nodiscard]] constexpr auto GetInvalidDeviceString() noexcept { return "Invalid Device"; }
-[[nodiscard]] constexpr auto GetInvalidContextString() noexcept { return "Invalid Context"; }
-[[nodiscard]] constexpr auto GetInvalidEnumString() noexcept { return "Invalid Enum"; }
-[[nodiscard]] constexpr auto GetInvalidValueString() noexcept { return "Invalid Value"; }
-[[nodiscard]] constexpr auto GetOutOfMemoryString() noexcept { return "Out of Memory"; }
-[[nodiscard]] constexpr auto GetExtensionString() noexcept -> const char*
+[[nodiscard]] constexpr auto GetNoErrorString() noexcept -> gsl::czstring { return "No Error"; }
+[[nodiscard]] constexpr auto GetInvalidDeviceString() noexcept -> gsl::czstring { return "Invalid Device"; }
+[[nodiscard]] constexpr auto GetInvalidContextString() noexcept -> gsl::czstring { return "Invalid Context"; }
+[[nodiscard]] constexpr auto GetInvalidEnumString() noexcept -> gsl::czstring { return "Invalid Enum"; }
+[[nodiscard]] constexpr auto GetInvalidValueString() noexcept -> gsl::czstring { return "Invalid Value"; }
+[[nodiscard]] constexpr auto GetOutOfMemoryString() noexcept -> gsl::czstring { return "Out of Memory"; }
+[[nodiscard]] constexpr auto GetExtensionString() noexcept -> gsl::czstring
 {
     return "ALC_ENUMERATE_ALL_EXT ALC_ENUMERATION_EXT ALC_EXT_CAPTURE "
-        "ALC_EXT_thread_local_context";
+        "ALC_EXT_thread_local_context ALC_SOFT_loopback";
 }
 
 [[nodiscard]] consteval auto GetExtensionArray() noexcept
@@ -314,20 +330,48 @@ constexpr auto alcMajorVersion = 1;
 constexpr auto alcMinorVersion = 1;
 
 
-auto EnumerationLock = std::recursive_mutex{};
+auto EnumerationLock = std::recursive_mutex{}; /* NOLINT(cert-err58-cpp) May throw on construction */
 auto ContextSwitchLock = std::mutex{};
 
 auto LastError = std::atomic<ALCenum>{ALC_NO_ERROR};
-auto DeviceIfaceMap = std::unordered_map<ALCdevice*,ALCuint>{};
-auto ContextIfaceMap = std::unordered_map<ALCcontext*,ALCuint>{};
 
-template<typename T, typename U, typename V> [[nodiscard]]
-auto maybe_get(std::unordered_map<T,U> &list, V&& key) -> std::optional<U>
-{
-    auto iter = list.find(std::forward<V>(key));
-    if(iter != list.end()) return iter->second;
-    return std::nullopt;
-}
+template<typename T>
+class ProtectedIfaceMap {
+    std::mutex IfaceMutex;
+    std::unordered_map<T,ALCuint> IfaceMap{};
+
+public:
+    auto lock() { return IfaceMutex.lock(); }
+    auto unlock() { return IfaceMutex.unlock(); }
+
+    class IfaceMapLock : public std::unique_lock<ProtectedIfaceMap> {
+    public:
+        using std::unique_lock<ProtectedIfaceMap>::unique_lock;
+
+        void emplace(T key, ALCuint value)
+        {
+            this->mutex()->IfaceMap.emplace(key, value);
+        }
+
+        void erase(T key)
+        {
+            this->mutex()->IfaceMap.erase(key);
+        }
+
+        template<typename V> [[nodiscard]]
+        auto lookup_idx(V&& key) -> std::optional<ALCuint>
+        {
+            auto iter = this->mutex()->IfaceMap.find(std::forward<V>(key));
+            if(iter != this->mutex()->IfaceMap.end()) return iter->second;
+            return std::nullopt;
+        }
+    };
+
+    auto get_lock() -> IfaceMapLock { return IfaceMapLock{*this}; }
+};
+
+auto DeviceIfaceMap = ProtectedIfaceMap<ALCdevice*>{};
+auto ContextIfaceMap = ProtectedIfaceMap<ALCcontext*>{};
 
 
 struct DeviceList {
@@ -345,23 +389,23 @@ public:
         mNamesStore.clear();
     }
 
-    explicit operator bool() const noexcept { return mEnumeratedDevices.empty(); }
+    explicit operator bool() const noexcept { return !mEnumeratedDevices.empty(); }
 
     void reserveDeviceCount(const size_t count) { mEnumeratedDevices.reserve(count); }
-    void appendDeviceList(const ALCchar *names, ALCuint idx);
+    void appendDeviceList(const gsl::czstring names, ALCuint idx);
     void finishEnumeration();
 
     [[nodiscard]]
     auto getDriverIndexForName(const std::string_view name) const -> std::optional<ALCuint>;
 
     [[nodiscard]]
-    auto getNameData() const noexcept -> const char* { return mNamesStore.data(); }
+    auto getNameData() const noexcept -> gsl::czstring { return mNamesStore.data(); }
 };
 auto DevicesList = EnumeratedList{};
 auto AllDevicesList = EnumeratedList{};
 auto CaptureDevicesList = EnumeratedList{};
 
-void EnumeratedList::appendDeviceList(const ALCchar *names, ALCuint idx)
+void EnumeratedList::appendDeviceList(const gsl::czstring names, ALCuint idx)
 {
     auto *name_end = names;
     if(!name_end) return;
@@ -425,15 +469,18 @@ void InitCtxFuncs(DriverIface &iface)
 {
     auto *device = iface.alcGetContextsDevice(iface.alcGetCurrentContext());
 
-#define LOAD_PROC(x) do {                                                     \
-    iface.x = reinterpret_cast<decltype(iface.x)>(iface.alGetProcAddress(#x));\
-    if(!iface.x)                                                              \
-        ERR("Failed to find entry point for {} in {}", #x,                    \
-            wstr_to_utf8(iface.Name));                                        \
-} while(0)
+    auto load_proc = [&iface](auto &func, const gsl::czstring name)
+    {
+        using func_t = std::remove_reference_t<decltype(func)>;
+        /* NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) */
+        func = reinterpret_cast<func_t>(iface.alGetProcAddress(name));
+        if(!func)
+            ERR("Failed to find entry point for {} in {}", name,
+                wstr_to_utf8(iface.Name));
+    };
+#define LOAD_PROC(x) load_proc(iface.x, #x)
     if(iface.alcIsExtensionPresent(device, "ALC_EXT_EFX"))
     {
-        /* NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast) */
         LOAD_PROC(alGenFilters);
         LOAD_PROC(alDeleteFilters);
         LOAD_PROC(alIsFilter);
@@ -467,7 +514,6 @@ void InitCtxFuncs(DriverIface &iface)
         LOAD_PROC(alGetAuxiliaryEffectSlotfv);
         LOAD_PROC(alGetAuxiliaryEffectSloti);
         LOAD_PROC(alGetAuxiliaryEffectSlotiv);
-        /* NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast) */
     }
 #undef LOAD_PROC
 }
@@ -524,14 +570,20 @@ ALC_API auto ALC_APIENTRY alcOpenDevice(const ALCchar *devicename) noexcept -> A
             }
             return false;
         }, &DriverIfacePtr::operator*);
-        if(iter != DriverList.end())
-            idx = static_cast<ALCuint>(std::distance(DriverList.begin(), iter));
+        if(iter == DriverList.end())
+        {
+            LastError.store(ALC_INVALID_DEVICE);
+            return nullptr;
+        }
+        idx = gsl::narrow_cast<ALCuint>(std::distance(DriverList.begin(), iter));
     }
 
-    if(device)
+    if(!device)
+        LastError.store(DriverList[idx.value()]->alcGetError(nullptr));
+    else
     {
         try {
-            DeviceIfaceMap.emplace(device, idx.value());
+            DeviceIfaceMap.get_lock().emplace(device, idx.value());
         }
         catch(...) {
             DriverList[idx.value()]->alcCloseDevice(device);
@@ -544,11 +596,11 @@ ALC_API auto ALC_APIENTRY alcOpenDevice(const ALCchar *devicename) noexcept -> A
 
 ALC_API auto ALC_APIENTRY alcCloseDevice(ALCdevice *device) noexcept -> ALCboolean
 {
-    if(const auto idx = maybe_get(DeviceIfaceMap, device))
+    if(auto lock = DeviceIfaceMap.get_lock(); const auto idx = lock.lookup_idx(device))
     {
         if(!DriverList[*idx]->alcCloseDevice(device))
             return ALC_FALSE;
-        DeviceIfaceMap.erase(device);
+        lock.erase(device);
         return ALC_TRUE;
     }
 
@@ -560,7 +612,7 @@ ALC_API auto ALC_APIENTRY alcCloseDevice(ALCdevice *device) noexcept -> ALCboole
 ALC_API auto ALC_APIENTRY alcCreateContext(ALCdevice *device, const ALCint *attrlist) noexcept
     -> ALCcontext*
 {
-    const auto idx = maybe_get(DeviceIfaceMap, device);
+    const auto idx = DeviceIfaceMap.get_lock().lookup_idx(device);
     if(!idx)
     {
         LastError.store(ALC_INVALID_DEVICE);
@@ -571,7 +623,7 @@ ALC_API auto ALC_APIENTRY alcCreateContext(ALCdevice *device, const ALCint *attr
     if(context)
     {
         try {
-            ContextIfaceMap.emplace(context, *idx);
+            ContextIfaceMap.get_lock().emplace(context, *idx);
         }
         catch(...) {
             DriverList[*idx]->alcDestroyContext(context);
@@ -589,7 +641,7 @@ ALC_API auto ALC_APIENTRY alcMakeContextCurrent(ALCcontext *context) noexcept ->
     auto idx = std::optional<ALCuint>{};
     if(context)
     {
-        idx = maybe_get(ContextIfaceMap, context);
+        idx = ContextIfaceMap.get_lock().lookup_idx(context);
         if(!idx)
         {
             LastError.store(ALC_INVALID_CONTEXT);
@@ -627,7 +679,7 @@ ALC_API auto ALC_APIENTRY alcMakeContextCurrent(ALCcontext *context) noexcept ->
 
 ALC_API void ALC_APIENTRY alcProcessContext(ALCcontext *context) noexcept
 {
-    if(const auto idx = maybe_get(ContextIfaceMap, context))
+    if(const auto idx = ContextIfaceMap.get_lock().lookup_idx(context))
         return DriverList[*idx]->alcProcessContext(context);
 
     LastError.store(ALC_INVALID_CONTEXT);
@@ -635,7 +687,7 @@ ALC_API void ALC_APIENTRY alcProcessContext(ALCcontext *context) noexcept
 
 ALC_API void ALC_APIENTRY alcSuspendContext(ALCcontext *context) noexcept
 {
-    if(const auto idx = maybe_get(ContextIfaceMap, context))
+    if(const auto idx = ContextIfaceMap.get_lock().lookup_idx(context))
         return DriverList[*idx]->alcSuspendContext(context);
 
     LastError.store(ALC_INVALID_CONTEXT);
@@ -643,10 +695,10 @@ ALC_API void ALC_APIENTRY alcSuspendContext(ALCcontext *context) noexcept
 
 ALC_API void ALC_APIENTRY alcDestroyContext(ALCcontext *context) noexcept
 {
-    if(const auto idx = maybe_get(ContextIfaceMap, context))
+    if(auto lock = ContextIfaceMap.get_lock(); const auto idx = lock.lookup_idx(context))
     {
         DriverList[*idx]->alcDestroyContext(context);
-        ContextIfaceMap.erase(context);
+        lock.erase(context);
         return;
     }
     LastError.store(ALC_INVALID_CONTEXT);
@@ -661,7 +713,7 @@ ALC_API auto ALC_APIENTRY alcGetCurrentContext() noexcept -> ALCcontext*
 
 ALC_API auto ALC_APIENTRY alcGetContextsDevice(ALCcontext *context) noexcept -> ALCdevice*
 {
-    if(const auto idx = maybe_get(ContextIfaceMap, context))
+    if(const auto idx = ContextIfaceMap.get_lock().lookup_idx(context))
         return DriverList[*idx]->alcGetContextsDevice(context);
 
     LastError.store(ALC_INVALID_CONTEXT);
@@ -673,7 +725,7 @@ ALC_API auto ALC_APIENTRY alcGetError(ALCdevice *device) noexcept -> ALCenum
 {
     if(device)
     {
-        if(const auto idx = maybe_get(DeviceIfaceMap, device))
+        if(const auto idx = DeviceIfaceMap.get_lock().lookup_idx(device))
             return DriverList[*idx]->alcGetError(device);
         return ALC_INVALID_DEVICE;
     }
@@ -685,7 +737,7 @@ ALC_API auto ALC_APIENTRY alcIsExtensionPresent(ALCdevice *device, const ALCchar
 {
     if(device)
     {
-        if(const auto idx = maybe_get(DeviceIfaceMap, device))
+        if(const auto idx = DeviceIfaceMap.get_lock().lookup_idx(device))
             return DriverList[*idx]->alcIsExtensionPresent(device, extname);
 
         LastError.store(ALC_INVALID_DEVICE);
@@ -702,7 +754,7 @@ ALC_API auto ALC_APIENTRY alcGetProcAddress(ALCdevice *device, const ALCchar *fu
 {
     if(device)
     {
-        if(const auto idx = maybe_get(DeviceIfaceMap, device))
+        if(const auto idx = DeviceIfaceMap.get_lock().lookup_idx(device))
             return DriverList[*idx]->alcGetProcAddress(device, funcname);
 
         LastError.store(ALC_INVALID_DEVICE);
@@ -719,7 +771,7 @@ ALC_API auto ALC_APIENTRY alcGetEnumValue(ALCdevice *device, const ALCchar *enum
 {
     if(device)
     {
-        if(const auto idx = maybe_get(DeviceIfaceMap, device))
+        if(const auto idx = DeviceIfaceMap.get_lock().lookup_idx(device))
             return DriverList[*idx]->alcGetEnumValue(device, enumname);
 
         LastError.store(ALC_INVALID_DEVICE);
@@ -737,7 +789,7 @@ ALC_API auto ALC_APIENTRY alcGetString(ALCdevice *device, ALCenum param) noexcep
 
     if(device)
     {
-        if(const auto idx = maybe_get(DeviceIfaceMap, device))
+        if(const auto idx = DeviceIfaceMap.get_lock().lookup_idx(device))
             return DriverList[*idx]->alcGetString(device, param);
 
         LastError.store(ALC_INVALID_DEVICE);
@@ -861,7 +913,7 @@ ALC_API void ALC_APIENTRY alcGetIntegerv(ALCdevice *device, ALCenum param, ALCsi
 {
     if(device)
     {
-        if(const auto idx = maybe_get(DeviceIfaceMap, device))
+        if(const auto idx = DeviceIfaceMap.get_lock().lookup_idx(device))
             return DriverList[*idx]->alcGetIntegerv(device, param, size, values);
 
         LastError.store(ALC_INVALID_DEVICE);
@@ -951,14 +1003,20 @@ ALC_API auto ALC_APIENTRY alcCaptureOpenDevice(const ALCchar *devicename, ALCuin
             }
             return false;
         }, &DriverIfacePtr::operator*);
-        if(iter != DriverList.end())
-            idx = static_cast<ALCuint>(std::distance(DriverList.begin(), iter));
+        if(iter == DriverList.end())
+        {
+            LastError.store(ALC_INVALID_DEVICE);
+            return nullptr;
+        }
+        idx = gsl::narrow_cast<ALCuint>(std::distance(DriverList.begin(), iter));
     }
 
-    if(device)
+    if(!device)
+        LastError.store(DriverList[idx.value()]->alcGetError(nullptr));
+    else
     {
         try {
-            DeviceIfaceMap.emplace(device, idx.value());
+            DeviceIfaceMap.get_lock().emplace(device, idx.value());
         }
         catch(...) {
             DriverList[idx.value()]->alcCaptureCloseDevice(device);
@@ -971,11 +1029,11 @@ ALC_API auto ALC_APIENTRY alcCaptureOpenDevice(const ALCchar *devicename, ALCuin
 
 ALC_API auto ALC_APIENTRY alcCaptureCloseDevice(ALCdevice *device) noexcept -> ALCboolean
 {
-    if(const auto idx = maybe_get(DeviceIfaceMap, device))
+    if(auto lock = DeviceIfaceMap.get_lock(); const auto idx = lock.lookup_idx(device))
     {
         if(!DriverList[*idx]->alcCaptureCloseDevice(device))
             return ALC_FALSE;
-        DeviceIfaceMap.erase(device);
+        lock.erase(device);
         return ALC_TRUE;
     }
 
@@ -985,14 +1043,14 @@ ALC_API auto ALC_APIENTRY alcCaptureCloseDevice(ALCdevice *device) noexcept -> A
 
 ALC_API void ALC_APIENTRY alcCaptureStart(ALCdevice *device) noexcept
 {
-    if(const auto idx = maybe_get(DeviceIfaceMap, device))
+    if(const auto idx = DeviceIfaceMap.get_lock().lookup_idx(device))
         return DriverList[*idx]->alcCaptureStart(device);
     LastError.store(ALC_INVALID_DEVICE);
 }
 
 ALC_API void ALC_APIENTRY alcCaptureStop(ALCdevice *device) noexcept
 {
-    if(const auto idx = maybe_get(DeviceIfaceMap, device))
+    if(const auto idx = DeviceIfaceMap.get_lock().lookup_idx(device))
         return DriverList[*idx]->alcCaptureStop(device);
     LastError.store(ALC_INVALID_DEVICE);
 }
@@ -1000,7 +1058,7 @@ ALC_API void ALC_APIENTRY alcCaptureStop(ALCdevice *device) noexcept
 ALC_API void ALC_APIENTRY alcCaptureSamples(ALCdevice *device, ALCvoid *buffer, ALCsizei samples)
     noexcept
 {
-    if(const auto idx = maybe_get(DeviceIfaceMap, device))
+    if(const auto idx = DeviceIfaceMap.get_lock().lookup_idx(device))
         return DriverList[*idx]->alcCaptureSamples(device, buffer, samples);
     LastError.store(ALC_INVALID_DEVICE);
 }
@@ -1018,7 +1076,7 @@ ALC_API auto ALC_APIENTRY alcSetThreadContext(ALCcontext *context) noexcept -> A
     }
 
     auto err = ALCenum{ALC_INVALID_CONTEXT};
-    if(const auto idx = maybe_get(ContextIfaceMap, context); idx
+    if(const auto idx = ContextIfaceMap.get_lock().lookup_idx(context); idx
         && DriverList[*idx]->alcSetThreadContext)
     {
         if(DriverList[*idx]->alcSetThreadContext(context))
@@ -1044,4 +1102,94 @@ ALC_API auto ALC_APIENTRY alcGetThreadContext() noexcept -> ALCcontext*
     if(auto *iface = GetThreadDriver())
         return iface->alcGetThreadContext();
     return nullptr;
+}
+
+ALC_API auto ALC_APIENTRY alcLoopbackOpenDeviceSOFT(const ALCchar *deviceName) noexcept
+    -> ALCdevice*
+{
+    LoadDrivers();
+
+    auto *device = LPALCdevice{nullptr};
+    auto idx = std::optional<ALCuint>{};
+
+    if(deviceName && *deviceName != '\0')
+    {
+        {
+            auto enumlock = std::lock_guard{EnumerationLock};
+            if(!DevicesList)
+                std::ignore = alcGetString(nullptr, ALC_DEVICE_SPECIFIER);
+            idx = DevicesList.getDriverIndexForName(deviceName);
+        }
+
+        if(!idx)
+        {
+            LastError.store(ALC_INVALID_VALUE);
+            TRACE("Failed to find driver for name \"{}\"", deviceName);
+            return nullptr;
+        }
+        TRACE("Found driver {} for name \"{}\"", *idx, deviceName);
+        if(!DriverList[*idx]->alcLoopbackOpenDeviceSOFT)
+        {
+            LastError.store(ALC_INVALID_VALUE);
+            WARN("Loopback not supported on device {}", deviceName);
+            return nullptr;
+        }
+        device = DriverList[*idx]->alcLoopbackOpenDeviceSOFT(deviceName);
+    }
+    else
+    {
+        const auto iter = std::ranges::find_if(DriverList, [&device](const DriverIface &drv) ->bool
+        {
+            if(drv.alcLoopbackOpenDeviceSOFT)
+            {
+                TRACE("Using default loopback device from driver {}", wstr_to_utf8(drv.Name));
+                device = drv.alcLoopbackOpenDeviceSOFT(nullptr);
+                return true;
+            }
+            return false;
+        }, &DriverIfacePtr::operator*);
+        if(iter == DriverList.end())
+        {
+            LastError.store(ALC_INVALID_DEVICE);
+            return nullptr;
+        }
+        idx = gsl::narrow_cast<ALCuint>(std::distance(DriverList.begin(), iter));
+    }
+
+    if(!device)
+        LastError.store(DriverList[idx.value()]->alcGetError(nullptr));
+    else
+    {
+        try {
+            DeviceIfaceMap.get_lock().emplace(device, idx.value());
+        }
+        catch(...) {
+            DriverList[idx.value()]->alcCloseDevice(device);
+            device = nullptr;
+        }
+    }
+
+    return device;
+}
+
+ALC_API auto ALC_APIENTRY alcIsRenderFormatSupportedSOFT(ALCdevice *device, ALCsizei freq,
+    ALCenum channels, ALCenum type) noexcept -> ALCboolean
+{
+    if(const auto idx = DeviceIfaceMap.get_lock().lookup_idx(device))
+        return DriverList[*idx]->alcIsRenderFormatSupportedSOFT(device, freq, channels, type);
+    LastError.store(ALC_INVALID_DEVICE);
+    return ALC_FALSE;
+}
+
+ALC_API auto ALC_APIENTRY alcRenderSamplesSOFT(ALCdevice *device, ALCvoid *buffer,
+    ALCsizei samples) noexcept -> void
+{
+    /* NOTE: Not real-time safe! If you need this to be real-time safe,
+     * retrieve and use the driver-specific function directly (i.e. from
+     * alcGetProcAddress(device, "alcRenderSamplesSOFT")) rather than the
+     * global router thunk.
+     */
+    if(const auto idx = DeviceIfaceMap.get_lock().lookup_idx(device))
+        return DriverList[*idx]->alcRenderSamplesSOFT(device, buffer, samples);
+    LastError.store(ALC_INVALID_DEVICE);
 }

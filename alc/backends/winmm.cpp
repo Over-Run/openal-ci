@@ -30,21 +30,23 @@
 #include <mmsystem.h>
 #include <mmreg.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <format>
+#include <ranges>
+#include <string>
 #include <thread>
 #include <vector>
-#include <string>
-#include <algorithm>
 
 #include "alnumeric.h"
 #include "althrd_setname.h"
 #include "core/device.h"
 #include "core/helpers.h"
 #include "core/logging.h"
-#include "fmt/core.h"
+#include "gsl/gsl"
 #include "ringbuffer.h"
-#include "strutils.h"
+#include "strutils.hpp"
 #include "vector.h"
 
 #ifndef WAVE_FORMAT_IEEE_FLOAT
@@ -63,13 +65,13 @@ void ProbePlaybackDevices()
 {
     PlaybackDevices.clear();
 
-    UINT numdevs{waveOutGetNumDevs()};
+    const auto numdevs = waveOutGetNumDevs();
     PlaybackDevices.reserve(numdevs);
-    for(UINT i{0};i < numdevs;++i)
+    for(const auto i : std::views::iota(0u, numdevs))
     {
-        std::string dname;
+        auto dname = std::string{};
 
-        WAVEOUTCAPSW WaveCaps{};
+        auto WaveCaps = WAVEOUTCAPSW{};
         if(waveOutGetDevCapsW(i, &WaveCaps, sizeof(WaveCaps)) == MMSYSERR_NOERROR)
         {
             const auto basename = wstr_to_utf8(std::data(WaveCaps.szPname));
@@ -77,7 +79,7 @@ void ProbePlaybackDevices()
             auto count = 1;
             auto newname = basename;
             while(checkName(PlaybackDevices, newname))
-                newname = fmt::format("{} #{}", basename, ++count);
+                newname = std::format("{} #{}", basename, ++count);
             dname = std::move(newname);
 
             TRACE("Got device \"{}\", ID {}", dname, i);
@@ -90,13 +92,13 @@ void ProbeCaptureDevices()
 {
     CaptureDevices.clear();
 
-    UINT numdevs{waveInGetNumDevs()};
+    const auto numdevs = waveInGetNumDevs();
     CaptureDevices.reserve(numdevs);
-    for(UINT i{0};i < numdevs;++i)
+    for(const auto i : std::views::iota(0u, numdevs))
     {
-        std::string dname;
+        auto dname = std::string{};
 
-        WAVEINCAPSW WaveCaps{};
+        auto WaveCaps = WAVEINCAPSW{};
         if(waveInGetDevCapsW(i, &WaveCaps, sizeof(WaveCaps)) == MMSYSERR_NOERROR)
         {
             const auto basename = wstr_to_utf8(std::data(WaveCaps.szPname));
@@ -104,7 +106,7 @@ void ProbeCaptureDevices()
             auto count = 1;
             auto newname = basename;
             while(checkName(CaptureDevices, newname))
-                newname = fmt::format("{} #{}", basename, ++count);
+                newname = std::format("{} #{}", basename, ++count);
             dname = std::move(newname);
 
             TRACE("Got device \"{}\", ID {}", dname, i);
@@ -115,7 +117,7 @@ void ProbeCaptureDevices()
 
 
 struct WinMMPlayback final : public BackendBase {
-    explicit WinMMPlayback(DeviceBase *device) noexcept : BackendBase{device} { }
+    explicit WinMMPlayback(gsl::not_null<DeviceBase*> device) noexcept : BackendBase{device} { }
     ~WinMMPlayback() override;
 
     void CALLBACK waveOutProc(HWAVEOUT device, UINT msg, DWORD_PTR param1, DWORD_PTR param2) noexcept;
@@ -183,7 +185,7 @@ FORCE_ALIGN int WinMMPlayback::mixerProc()
             waveOutWrite(mOutHdl, &waveHdr, sizeof(WAVEHDR));
             --todo;
         }
-        mIdx = static_cast<uint>(widx);
+        mIdx = gsl::narrow_cast<uint>(widx);
     }
 
     return 0;
@@ -202,7 +204,7 @@ void WinMMPlayback::open(std::string_view name)
     if(iter == PlaybackDevices.cend())
         throw al::backend_exception{al::backend_error::NoDevice, "Device name \"{}\" not found",
             name};
-    auto DeviceID = static_cast<UINT>(std::distance(PlaybackDevices.cbegin(), iter));
+    auto DeviceID = gsl::narrow_cast<UINT>(std::distance(PlaybackDevices.cbegin(), iter));
 
     DevFmtType fmttype{mDevice->FmtType};
     WAVEFORMATEX format{};
@@ -222,7 +224,7 @@ void WinMMPlayback::open(std::string_view name)
                 format.wBitsPerSample = 16;
         }
         format.nChannels = ((mDevice->FmtChans == DevFmtMono) ? 1 : 2);
-        format.nBlockAlign = static_cast<WORD>(format.wBitsPerSample * format.nChannels / 8);
+        format.nBlockAlign = gsl::narrow_cast<WORD>(format.wBitsPerSample * format.nChannels / 8);
         format.nSamplesPerSec = mDevice->mSampleRate;
         format.nAvgBytesPerSec = format.nSamplesPerSec * format.nBlockAlign;
         format.cbSize = 0;
@@ -246,7 +248,7 @@ void WinMMPlayback::open(std::string_view name)
 
 bool WinMMPlayback::reset()
 {
-    mDevice->mBufferSize = static_cast<uint>(uint64_t{mDevice->mBufferSize} *
+    mDevice->mBufferSize = gsl::narrow_cast<uint>(uint64_t{mDevice->mBufferSize} *
         mFormat.nSamplesPerSec / mDevice->mSampleRate);
     mDevice->mBufferSize = (mDevice->mBufferSize+3) & ~0x3u;
     mDevice->mUpdateSize = mDevice->mBufferSize / 4;
@@ -322,7 +324,7 @@ void WinMMPlayback::start()
     try {
         for(auto &waveHdr : mWaveBuffer)
             waveOutPrepareHeader(mOutHdl, &waveHdr, sizeof(WAVEHDR));
-        mWritable.store(static_cast<uint>(mWaveBuffer.size()), std::memory_order_release);
+        mWritable.store(gsl::narrow_cast<uint>(mWaveBuffer.size()), std::memory_order_release);
 
         mKillNow.store(false, std::memory_order_release);
         mThread = std::thread{&WinMMPlayback::mixerProc, this};
@@ -352,7 +354,7 @@ void WinMMPlayback::stop()
 
 
 struct WinMMCapture final : public BackendBase {
-    explicit WinMMCapture(DeviceBase *device) noexcept : BackendBase{device} { }
+    explicit WinMMCapture(gsl::not_null<DeviceBase*> device) noexcept : BackendBase{device} { }
     ~WinMMCapture() override;
 
     void CALLBACK waveInProc(HWAVEIN device, UINT msg, DWORD_PTR param1, DWORD_PTR param2) noexcept;
@@ -364,7 +366,7 @@ struct WinMMCapture final : public BackendBase {
     void open(std::string_view name) override;
     void start() override;
     void stop() override;
-    void captureSamples(std::byte *buffer, uint samples) override;
+    void captureSamples(std::span<std::byte> outbuffer) override;
     auto availableSamples() -> uint override;
 
     std::atomic<uint> mReadable{0u};
@@ -374,7 +376,7 @@ struct WinMMCapture final : public BackendBase {
 
     HWAVEIN mInHdl{nullptr};
 
-    RingBuffer2Ptr<std::byte> mRing;
+    RingBufferPtr<std::byte> mRing;
 
     WAVEFORMATEX mFormat{};
 
@@ -424,7 +426,7 @@ void WinMMCapture::captureProc()
             waveInAddBuffer(mInHdl, &waveHdr, sizeof(WAVEHDR));
             --todo;
         }
-        mIdx = static_cast<uint>(widx);
+        mIdx = gsl::narrow_cast<uint>(widx);
     }
 }
 
@@ -439,7 +441,7 @@ void WinMMCapture::open(std::string_view name)
     if(iter == CaptureDevices.cend())
         throw al::backend_exception{al::backend_error::NoDevice, "Device name \"{}\" not found",
             name};
-    auto DeviceID = static_cast<UINT>(std::distance(CaptureDevices.begin(), iter));
+    auto DeviceID = gsl::narrow_cast<UINT>(std::distance(CaptureDevices.begin(), iter));
 
     switch(mDevice->FmtChans)
     {
@@ -480,9 +482,9 @@ void WinMMCapture::open(std::string_view name)
     mFormat = WAVEFORMATEX{};
     mFormat.wFormatTag = (mDevice->FmtType == DevFmtFloat) ?
         WAVE_FORMAT_IEEE_FLOAT : WAVE_FORMAT_PCM;
-    mFormat.nChannels = static_cast<WORD>(mDevice->channelsFromFmt());
-    mFormat.wBitsPerSample = static_cast<WORD>(mDevice->bytesFromFmt() * 8);
-    mFormat.nBlockAlign = static_cast<WORD>(mFormat.wBitsPerSample * mFormat.nChannels / 8);
+    mFormat.nChannels = gsl::narrow_cast<WORD>(mDevice->channelsFromFmt());
+    mFormat.wBitsPerSample = gsl::narrow_cast<WORD>(mDevice->bytesFromFmt() * 8);
+    mFormat.nBlockAlign = gsl::narrow_cast<WORD>(mFormat.wBitsPerSample * mFormat.nChannels / 8);
     mFormat.nSamplesPerSec = mDevice->mSampleRate;
     mFormat.nAvgBytesPerSec = mFormat.nSamplesPerSec * mFormat.nBlockAlign;
     mFormat.cbSize = 0;
@@ -502,7 +504,7 @@ void WinMMCapture::open(std::string_view name)
     const auto CapturedDataSize = std::max<size_t>(mDevice->mBufferSize,
         BufferSize*mWaveBuffer.size());
 
-    mRing = RingBuffer2<std::byte>::Create(CapturedDataSize, mFormat.nBlockAlign, false);
+    mRing = RingBuffer<std::byte>::Create(CapturedDataSize, mFormat.nBlockAlign, false);
 
     decltype(mBuffer)(BufferSize*mWaveBuffer.size()).swap(mBuffer);
     std::ranges::fill(mBuffer, clearval);
@@ -558,11 +560,11 @@ void WinMMCapture::stop()
     mIdx = 0;
 }
 
-void WinMMCapture::captureSamples(std::byte *buffer, uint samples)
-{ std::ignore = mRing->read(std::span{buffer, samples*mRing->getElemSize()}); }
+void WinMMCapture::captureSamples(std::span<std::byte> outbuffer)
+{ std::ignore = mRing->read(outbuffer); }
 
 auto WinMMCapture::availableSamples() -> uint
-{ return static_cast<uint>(mRing->readSpace()); }
+{ return gsl::narrow_cast<uint>(mRing->readSpace()); }
 
 } // namespace
 
@@ -596,7 +598,8 @@ auto WinMMBackendFactory::enumerate(BackendType type) -> std::vector<std::string
     return outnames;
 }
 
-BackendPtr WinMMBackendFactory::createBackend(DeviceBase *device, BackendType type)
+auto WinMMBackendFactory::createBackend(gsl::not_null<DeviceBase*> device, BackendType type)
+    -> BackendPtr
 {
     if(type == BackendType::Playback)
         return BackendPtr{new WinMMPlayback{device}};

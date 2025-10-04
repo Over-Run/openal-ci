@@ -4,12 +4,12 @@
 
 #include <algorithm>
 #include <array>
-#include <cassert>
 #include <cmath>
 #include <complex>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <iterator>
 #include <memory>
 #include <numbers>
 #include <ranges>
@@ -37,6 +37,7 @@
 #include "core/fmt_traits.h"
 #include "core/mixer.h"
 #include "core/uhjfilter.h"
+#include "gsl/gsl"
 #include "intrusive_ptr.h"
 #include "pffft.h"
 #include "polyphase_resampler.h"
@@ -86,13 +87,14 @@ inline void LoadSampleArray(const std::span<float> dstSamples,
     const std::span<const T> srcData, const size_t channel, const size_t srcstep) noexcept
 {
     using TypeTraits = SampleInfo<T>;
-    assert(channel < srcstep);
+    Expects(channel < srcstep);
 
-    auto ssrc = srcData.begin() + ptrdiff_t(channel);
+    auto ssrc = srcData.begin();
+    std::advance(ssrc, channel);
     dstSamples.front() = TypeTraits::to_float(*ssrc);
     std::ranges::generate(dstSamples | std::views::drop(1), [&ssrc,srcstep]
     {
-        ssrc += ptrdiff_t(srcstep);
+        std::advance(ssrc, srcstep);
         return TypeTraits::to_float(*ssrc);
     });
 }
@@ -100,14 +102,12 @@ inline void LoadSampleArray(const std::span<float> dstSamples,
 void LoadSamples(const std::span<float> dstSamples, const SampleVariant &src, const size_t channel,
     const size_t srcstep) noexcept
 {
-    std::visit([&](auto&& splvec)
+    std::visit([&]<typename T>(T&& splvec)
     {
-        using span_t = std::remove_cvref_t<decltype(splvec)>;
+        using span_t = std::remove_cvref_t<T>;
         using sample_t = span_t::value_type;
         if constexpr(!std::is_same_v<sample_t,IMA4Data> && !std::is_same_v<sample_t,MSADPCMData>)
             LoadSampleArray<sample_t>(dstSamples, splvec, channel, srcstep);
-        else
-            std::ranges::fill(splvec, SampleInfo<sample_t>::silence());
     }, src);
 }
 
@@ -150,8 +150,6 @@ struct ChanPosMap {
 };
 
 
-using complex_f = std::complex<float>;
-
 constexpr size_t ConvolveUpdateSize{256};
 constexpr size_t ConvolveUpdateSamples{ConvolveUpdateSize / 2};
 
@@ -160,7 +158,7 @@ void apply_fir(std::span<float> dst, std::span<const float> input,
     const std::span<const float,ConvolveUpdateSamples> filter)
 {
 #if HAVE_SSE_INTRINSICS
-    std::generate(dst.begin(), dst.end(), [&input,filter]
+    std::ranges::generate(dst, [&input,filter]
     {
         auto r4 = _mm_setzero_ps();
         for(size_t j{0};j < ConvolveUpdateSamples;j+=4)
@@ -179,7 +177,7 @@ void apply_fir(std::span<float> dst, std::span<const float> input,
 
 #elif HAVE_NEON
 
-    std::generate(dst.begin(), dst.end(), [&input,filter]
+    std::ranges::generate(dst, [&input,filter]
     {
         auto r4 = vdupq_n_f32(0.0f);
         for(size_t j{0};j < ConvolveUpdateSamples;j+=4)
@@ -192,7 +190,7 @@ void apply_fir(std::span<float> dst, std::span<const float> input,
 
 #else
 
-    std::generate(dst.begin(), dst.end(), [&input,filter]
+    std::ranges::generate(dst, [&input,filter]
     {
         auto ret = 0.0f;
         for(size_t j{0};j < ConvolveUpdateSamples;++j)
@@ -309,16 +307,15 @@ void ConvolutionState::deviceUpdate(const DeviceBase *device, const BufferStorag
      * attenuation that some people may be able to pick up on. Since this is
      * called very infrequently, go ahead and use the polyphase resampler.
      */
-    PPhaseResampler resampler;
+    auto resampler = PPhaseResampler{};
     if(device->mSampleRate != buffer->mSampleRate)
         resampler.init(buffer->mSampleRate, device->mSampleRate);
     const auto resampledCount = static_cast<uint>(
         (uint64_t{buffer->mSampleLen}*device->mSampleRate+(buffer->mSampleRate-1)) /
         buffer->mSampleRate);
 
-    const BandSplitter splitter{device->mXOverFreq / static_cast<float>(device->mSampleRate)};
-    for(auto &e : mChans)
-        e.mFilter = splitter;
+    const auto splitter = BandSplitter{device->mXOverFreq/static_cast<float>(device->mSampleRate)};
+    std::ranges::fill(mChans | std::views::transform(&ChannelData::mFilter), splitter);
 
     mFilter.resize(numChannels, {});
     mOutput.resize(numChannels, {});
@@ -335,60 +332,72 @@ void ConvolutionState::deviceUpdate(const DeviceBase *device, const BufferStorag
     mComplexData.resize(complex_length, 0.0f);
 
     /* Load the samples from the buffer. */
-    const size_t srclinelength{RoundUp(buffer->mSampleLen+DecoderPadding, 16)};
+    const auto srclinelength = size_t{RoundFromZero(buffer->mSampleLen+DecoderPadding, 16_uz)};
     auto srcsamples = std::vector<float>(srclinelength * numChannels);
-    std::fill(srcsamples.begin(), srcsamples.end(), 0.0f);
-    for(size_t c{0};c < numChannels && c < realChannels;++c)
+    std::ranges::fill(srcsamples, 0.0f);
+    for(const auto c : std::views::iota(0_uz, std::min<size_t>(numChannels, realChannels)))
         LoadSamples(std::span{srcsamples}.subspan(srclinelength*c, buffer->mSampleLen),
             buffer->mData, c, realChannels);
 
     if(IsUHJ(mChannels))
     {
+        auto samples = std::array<std::span<float>,4>{};
         auto decoder = std::make_unique<UhjDecoderType>();
-        std::array<float*,4> samples{};
-        for(size_t c{0};c < numChannels;++c)
-            samples[c] = std::to_address(srcsamples.begin() + ptrdiff_t(srclinelength*c));
-        decoder->decode({samples.data(), numChannels}, buffer->mSampleLen, buffer->mSampleLen);
+        for(auto base = 0_uz;base < buffer->mSampleLen;)
+        {
+            const auto todo = std::min(buffer->mSampleLen-base, BufferLineSize);
+            auto srciter = std::next(srcsamples.begin(), gsl::narrow_cast<ptrdiff_t>(base));
+            std::ranges::generate(samples | std::views::take(numChannels),
+                [&srciter,srclinelength,todo]
+            {
+                const auto ret = srciter;
+                std::advance(srciter, srclinelength);
+                return std::span{ret, todo+DecoderPadding};
+            });
+            decoder->decode(std::span{samples}.first(numChannels), true);
+            base += todo;
+        }
     }
 
     auto ressamples = std::vector<double>(buffer->mSampleLen + (resampler ? resampledCount : 0));
     auto ffttmp = al::vector<float,16>(ConvolveUpdateSize);
     auto fftbuffer = std::vector<std::complex<double>>(ConvolveUpdateSize);
 
-    auto filteriter = mComplexData.begin() + ptrdiff_t(mNumConvolveSegs*ConvolveUpdateSize);
-    for(size_t c{0};c < numChannels;++c)
+    auto filteriter = mComplexData.begin();
+    std::advance(filteriter, mNumConvolveSegs*ConvolveUpdateSize);
+    for(const auto c : std::views::iota(0_uz, size_t{numChannels}))
     {
         auto bufsamples = std::span{srcsamples}.subspan(srclinelength*c, buffer->mSampleLen);
         /* Resample to match the device. */
         if(resampler)
         {
             auto restmp = std::span{ressamples}.subspan(resampledCount, buffer->mSampleLen);
-            std::copy(bufsamples.begin(), bufsamples.end(), restmp.begin());
+            std::ranges::copy(bufsamples, restmp.begin());
             resampler.process(restmp, std::span{ressamples}.first(resampledCount));
         }
         else
-            std::copy(bufsamples.begin(), bufsamples.end(), ressamples.begin());
+            std::ranges::copy(bufsamples, ressamples.begin());
 
         /* Store the first segment's samples in reverse in the time-domain, to
          * apply as a FIR filter.
          */
-        const size_t first_size{std::min(size_t{resampledCount}, ConvolveUpdateSamples)};
+        const auto first_size = std::min(size_t{resampledCount}, ConvolveUpdateSamples);
         auto sampleseg = std::span{ressamples.cbegin(), first_size};
-        std::transform(sampleseg.begin(), sampleseg.end(), mFilter[c].rbegin(),
-            [](const double d) noexcept -> float { return static_cast<float>(d); });
+        std::ranges::transform(sampleseg, mFilter[c].rbegin(), [](const double d) noexcept -> float
+        { return gsl::narrow_cast<float>(d); });
 
-        size_t done{first_size};
-        for(size_t s{0};s < mNumConvolveSegs;++s)
+        auto done = first_size;
+        for(const auto s [[maybe_unused]] : std::views::iota(0_uz, mNumConvolveSegs))
         {
-            const size_t todo{std::min(resampledCount-done, ConvolveUpdateSamples)};
+            const auto todo = std::min(resampledCount-done, ConvolveUpdateSamples);
             sampleseg = std::span{ressamples}.subspan(done, todo);
 
             /* Apply a double-precision forward FFT for more precise frequency
              * measurements.
              */
-            auto iter = std::copy(sampleseg.begin(), sampleseg.end(), fftbuffer.begin());
+            auto iter = std::ranges::copy(sampleseg, fftbuffer.begin()).out;
             done += todo;
-            std::fill(iter, fftbuffer.end(), std::complex<double>{});
+            std::ranges::fill(iter, fftbuffer.end(), std::complex<double>{});
             forward_fft(std::span{fftbuffer});
 
             /* Convert to, and pack in, a float buffer for PFFFT. Note that the
@@ -396,8 +405,8 @@ void ConvolutionState::deviceUpdate(const DeviceBase *device, const BufferStorag
              * the imaginary component. Also scale the FFT by its length so the
              * iFFT'd output will be normalized.
              */
-            static constexpr float fftscale{1.0f / float{ConvolveUpdateSize}};
-            for(size_t i{0};i < ConvolveUpdateSamples;++i)
+            static constexpr auto fftscale = 1.0f / float{ConvolveUpdateSize};
+            for(const auto i : std::views::iota(0_uz, ConvolveUpdateSamples))
             {
                 ffttmp[i*2    ] = static_cast<float>(fftbuffer[i].real()) * fftscale;
                 ffttmp[i*2 + 1] = static_cast<float>((i == 0) ?
@@ -407,7 +416,7 @@ void ConvolutionState::deviceUpdate(const DeviceBase *device, const BufferStorag
              * subsequent pffft_transform(..., PFFFT_BACKWARD).
              */
             mFft.zreorder(ffttmp.begin(), filteriter, PFFFT_BACKWARD);
-            filteriter += ConvolveUpdateSize;
+            std::advance(filteriter, ConvolveUpdateSize);
         }
     }
 }
@@ -471,13 +480,12 @@ void ConvolutionState::update(const ContextBase *context, const EffectSlot *slot
     auto &props = std::get<ConvolutionProps>(*props_);
     mMix = &ConvolutionState::NormalMix;
 
-    for(auto &chan : mChans)
-        std::fill(chan.Target.begin(), chan.Target.end(), 0.0f);
+    std::ranges::fill(mChans|std::views::transform(&ChannelData::Target)|std::views::join, 0.0f);
     const float gain{slot->Gain};
     if(IsAmbisonic(mChannels))
     {
-        DeviceBase *device{context->mDevice};
-        if(mChannels == FmtUHJ2 && !device->mUhjEncoder)
+        auto const device = al::get_not_null(context->mDevice);
+        if(mChannels == FmtUHJ2 && !std::holds_alternative<UhjPostProcess>(device->mPostProcess))
         {
             mMix = &ConvolutionState::UpsampleMix;
             mChans[0].mHfScale = 1.0f;
@@ -528,16 +536,16 @@ void ConvolutionState::update(const ContextBase *context, const EffectSlot *slot
             const size_t acn{index_map[c]};
             const float scale{scales[acn]};
 
-            std::transform(mixmatrix[acn].cbegin(), mixmatrix[acn].cend(), coeffs.begin(),
-                [scale](const float in) noexcept -> float { return in * scale; });
+            std::ranges::transform(mixmatrix[acn], coeffs.begin(), [scale](const float in) -> float
+            { return in * scale; });
 
             ComputePanGains(target.Main, coeffs, gain, mChans[c].Target);
         }
     }
     else
     {
-        DeviceBase *device{context->mDevice};
-        std::span<const ChanPosMap> chanmap{};
+        auto const device = al::get_not_null(context->mDevice);
+        auto chanmap = std::span<const ChanPosMap>{};
         switch(mChannels)
         {
         case FmtMono: chanmap = MonoMap; break;
@@ -624,8 +632,8 @@ void ConvolutionState::process(const size_t samplesToDo,
     {
         const size_t todo{std::min(ConvolveUpdateSamples-mFifoPos, samplesToDo-base)};
 
-        std::copy_n(samplesIn[0].begin() + ptrdiff_t(base), todo,
-            mInput.begin()+ptrdiff_t(ConvolveUpdateSamples+mFifoPos));
+        std::ranges::copy(samplesIn[0] | std::views::drop(base) | std::views::take(todo),
+            (mInput | std::views::drop(ConvolveUpdateSamples+mFifoPos)).begin());
 
         /* Apply the FIR for the newly retrieved input samples, and combine it
          * with the inverse FFT'd output samples.
@@ -657,26 +665,28 @@ void ConvolutionState::process(const size_t samplesToDo,
         mFft.transform(mInput.begin(), &mComplexData[curseg*ConvolveUpdateSize],
             mFftWorkBuffer.begin(), PFFFT_FORWARD);
 
-        auto filter = mComplexData.cbegin() + ptrdiff_t(mNumConvolveSegs*ConvolveUpdateSize);
+        auto filter = mComplexData.cbegin();
+        std::advance(filter, mNumConvolveSegs*ConvolveUpdateSize);
         for(size_t c{0};c < mChans.size();++c)
         {
             /* Convolve each input segment with its IR filter counterpart
              * (aligned in time).
              */
             mFftBuffer.fill(0.0f);
-            auto input = mComplexData.cbegin() + ptrdiff_t(curseg*ConvolveUpdateSize);
+            auto input = mComplexData.cbegin();
+            std::advance(input, curseg*ConvolveUpdateSize);
             for(size_t s{curseg};s < mNumConvolveSegs;++s)
             {
                 mFft.zconvolve_accumulate(input, filter, mFftBuffer.begin());
-                input += ConvolveUpdateSize;
-                filter += ConvolveUpdateSize;
+                std::advance(input, ConvolveUpdateSize);
+                std::advance(filter, ConvolveUpdateSize);
             }
             input = mComplexData.cbegin();
             for(size_t s{0};s < curseg;++s)
             {
                 mFft.zconvolve_accumulate(input, filter, mFftBuffer.begin());
-                input += ConvolveUpdateSize;
-                filter += ConvolveUpdateSize;
+                std::advance(input, ConvolveUpdateSize);
+                std::advance(filter, ConvolveUpdateSize);
             }
 
             /* Apply iFFT to get the 256 (really 255) samples for output. The
@@ -688,10 +698,11 @@ void ConvolutionState::process(const size_t samplesToDo,
                 PFFFT_BACKWARD);
 
             /* The filter was attenuated, so the response is already scaled. */
-            std::transform(mFftBuffer.cbegin(), mFftBuffer.cbegin()+ConvolveUpdateSamples,
-                mOutput[c].cbegin()+ConvolveUpdateSamples, mOutput[c].begin(), std::plus{});
-            std::copy(mFftBuffer.cbegin()+ConvolveUpdateSamples, mFftBuffer.cend(),
-                mOutput[c].begin()+ConvolveUpdateSamples);
+            std::ranges::transform(mFftBuffer | std::views::take(ConvolveUpdateSamples),
+                mOutput[c] | std::views::drop(ConvolveUpdateSamples), mOutput[c].begin(),
+                std::plus{});
+            std::ranges::copy(mFftBuffer | std::views::drop(ConvolveUpdateSamples),
+                (mOutput[c] | std::views::drop(ConvolveUpdateSamples)).begin());
         }
 
         /* Shift the input history. */
@@ -711,8 +722,8 @@ struct ConvolutionStateFactory final : public EffectStateFactory {
 
 } // namespace
 
-EffectStateFactory *ConvolutionStateFactory_getFactory()
+auto ConvolutionStateFactory_getFactory() -> gsl::not_null<EffectStateFactory*>
 {
     static ConvolutionStateFactory ConvolutionFactory{};
-    return &ConvolutionFactory;
+    return gsl::make_not_null(&ConvolutionFactory);
 }

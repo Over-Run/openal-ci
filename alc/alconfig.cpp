@@ -32,11 +32,13 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cctype>
 #include <cstdlib>
 #include <fstream>
 #include <istream>
 #include <limits>
+#include <ranges>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -48,7 +50,9 @@
 #include "core/helpers.h"
 #include "core/logging.h"
 #include "filesystem.h"
-#include "strutils.h"
+#include "fmt/ranges.h"
+#include "gsl/gsl"
+#include "strutils.hpp"
 
 #if ALSOFT_UWP
 #include <winrt/Windows.Media.Core.h> // !!This is important!!
@@ -62,12 +66,6 @@ namespace {
 
 using namespace std::string_view_literals;
 
-#if defined(_WIN32) && !defined(_GAMING_XBOX) && !ALSOFT_UWP
-struct CoTaskMemDeleter {
-    void operator()(void *mem) const { CoTaskMemFree(mem); }
-};
-#endif
-
 const auto EmptyString = std::string{};
 
 struct ConfigEntry {
@@ -75,26 +73,65 @@ struct ConfigEntry {
     std::string value;
 
     ConfigEntry(auto&& key_, auto&& value_)
-        : key{std::forward<std::remove_cvref_t<decltype(key_)>>(key_)}
-        , value{std::forward<std::remove_cvref_t<decltype(value_)>>(value_)}
+        : key{std::forward<decltype(key_)>(key_)}, value{std::forward<decltype(value_)>(value_)}
     { }
 };
 std::vector<ConfigEntry> ConfOpts;
 
+
+/* True UTF-8 validation is way beyond me. However, this should weed out any
+ * obviously non-UTF-8 text.
+ *
+ * The general form of the byte stream is relatively simple. The first byte of
+ * a codepoint either has a 0 bit for the msb, indicating a single-byte ASCII-
+ * compatible codepoint, or the number of bytes that make up the codepoint
+ * (including itself) indicated by the number of successive 1 bits, and each
+ * successive byte of the codepoint has '10' for the top bits. That is:
+ *
+ * 0xxxxxxx - single-byte ASCII-compatible codepoint
+ * 110xxxxx 10xxxxxx - two-byte codepoint
+ * 1110xxxx 10xxxxxx 10xxxxxx - three-byte codepoint
+ * 11110xxx 10xxxxxx 10xxxxxx 10xxxxxx - four-byte codepoint
+ * ... etc ...
+ *
+ * Where the 'x' bits are concatenated together to form a 32-bit Unicode
+ * codepoint. This doesn't check whether the codepoints themselves are valid,
+ * it just validates the correct number of bytes for multi-byte sequences.
+ */
+auto validate_utf8(const std::string_view str) -> bool
+{
+    auto const end = str.end();
+    /* Look for the first multi-byte/non-ASCII codepoint. */
+    auto current = std::ranges::find_if(str.begin(), end,
+        [](const char ch) -> bool { return (ch&0x80) != 0; });
+    while(const auto remaining = std::distance(current, end))
+    {
+        /* Get the number of bytes that make up this codepoint (must be at
+         * least 2). This includes the current byte.
+         */
+        const auto tocheck = std::countl_one(as_unsigned(*current));
+        if(tocheck < 2 || tocheck > remaining)
+            return false;
+
+        const auto next = std::next(current, tocheck);
+
+        /* Check that the following bytes are a proper continuation. */
+        const auto valid = std::ranges::all_of(std::next(current), next,
+            [](const char ch) -> bool { return (ch&0xc0) == 0x80; });
+        if(not valid)
+            return false;
+
+        /* Seems okay. Look for the next multi-byte/non-ASCII codepoint. */
+        current = std::ranges::find_if(next, end, [](const char ch) -> bool { return ch&0x80; });
+    }
+    return true;
+}
 
 auto lstrip(std::string &line) -> std::string&
 {
     auto iter = std::ranges::find_if_not(line, [](const char c) { return std::isspace(c); });
     line.erase(line.begin(), iter);
     return line;
-}
-
-auto readline(std::istream &f, std::string &output) -> bool
-{
-    while(f.good() && f.peek() == '\n')
-        f.ignore();
-
-    return std::getline(f, output) && !output.empty();
 }
 
 auto expdup(std::string_view str) -> std::string
@@ -134,7 +171,7 @@ auto expdup(std::string_view str) -> std::string
         if(hasbraces && (envenditer == str.end() || *envenditer != '}'))
             continue;
 
-        const auto envend = size_t(std::distance(str.begin(), envenditer));
+        const auto envend = gsl::narrow<size_t>(std::distance(str.begin(), envenditer));
         const auto envname = std::string{str.substr(0, envend)};
         str.remove_prefix(envend + hasbraces);
 
@@ -151,24 +188,41 @@ void LoadConfigFromFile(std::istream &f)
 
     auto curSection = std::string{};
     auto buffer = std::string{};
+    auto linenum = 0_uz;
 
-    while(readline(f, buffer))
+    while(std::getline(f, buffer))
     {
+        ++linenum;
         if(lstrip(buffer).empty())
             continue;
+
+        auto cmtpos = std::min(buffer.find('#'), buffer.size());
+        if(cmtpos != 0)
+            cmtpos = buffer.find_last_not_of(whitespace_chars, cmtpos-1)+1;
+        if(cmtpos == 0) continue;
+        buffer.erase(cmtpos);
+
+        if(not validate_utf8(buffer))
+        {
+            ERR(" config parse error: non-UTF-8 characters on line {}", linenum);
+            ERR("{}", fmt::format("  {::#04x}",
+                buffer|std::views::transform([](auto c) { return as_unsigned(c); })));
+            continue;
+        }
 
         if(buffer[0] == '[')
         {
             const auto endpos = buffer.find(']', 1);
             if(endpos == 1 || endpos == std::string::npos)
             {
-                ERR(" config parse error: bad line \"{}\"", buffer);
+                ERR(" config parse error on line {}: bad section \"{}\"", linenum, buffer);
                 continue;
             }
             if(const auto last = buffer.find_first_not_of(whitespace_chars, endpos+1);
                 last < buffer.size() && buffer[last] != '#')
             {
-                ERR(" config parse error: bad line \"{}\"", buffer);
+                ERR(" config parse error on line {}: extraneous characters after section \"{}\"",
+                    linenum, buffer);
                 continue;
             }
 
@@ -206,12 +260,12 @@ void LoadConfigFromFile(std::istream &f)
                     else if(section[1] >= 'A' && section[1] <= 'F')
                         b = (section[1]-'A'+0x0a) << 4;
                     if(section[2] >= '0' && section[2] <= '9')
-                        b |= (section[2]-'0');
+                        b |= section[2]-'0';
                     else if(section[2] >= 'a' && section[2] <= 'f')
-                        b |= (section[2]-'a'+0xa);
+                        b |= section[2]-'a'+0xa;
                     else if(section[2] >= 'A' && section[2] <= 'F')
-                        b |= (section[2]-'A'+0x0a);
-                    curSection += static_cast<char>(b);
+                        b |= section[2]-'A'+0x0a;
+                    curSection += gsl::narrow_cast<char>(b);
                     section.remove_prefix(3);
                 }
                 else if(section.size() > 1 && section[1] == '%')
@@ -229,23 +283,17 @@ void LoadConfigFromFile(std::istream &f)
             continue;
         }
 
-        auto cmtpos = std::min(buffer.find('#'), buffer.size());
-        if(cmtpos != 0)
-            cmtpos = buffer.find_last_not_of(whitespace_chars, cmtpos-1)+1;
-        if(cmtpos == 0) continue;
-        buffer.erase(cmtpos);
-
         auto sep = buffer.find('=');
         if(sep == std::string::npos)
         {
-            ERR(" config parse error: malformed option line: \"{}\"", buffer);
+            ERR(" config parse error on line {}: malformed option \"{}\"", linenum, buffer);
             continue;
         }
         auto keypart = std::string_view{buffer}.substr(0, sep++);
         keypart.remove_suffix(keypart.size() - (keypart.find_last_not_of(whitespace_chars)+1));
         if(keypart.empty())
         {
-            ERR(" config parse error: malformed option line: \"{}\"", buffer);
+            ERR(" config parse error on line {}: malformed option \"{}\"", linenum, buffer);
             continue;
         }
         auto valpart = std::string_view{buffer}.substr(sep);
@@ -259,7 +307,7 @@ void LoadConfigFromFile(std::istream &f)
 
         if(valpart.size() > size_t{std::numeric_limits<int>::max()})
         {
-            ERR(" config parse error: value too long in line \"{}\"", buffer);
+            ERR(" config parse error on line {}: value too long \"{}\"", linenum, buffer);
             continue;
         }
         if(valpart.size() > 1)
@@ -275,8 +323,7 @@ void LoadConfigFromFile(std::istream &f)
         TRACE(" setting '{}' = '{}'", fullKey, valpart);
 
         /* Check if we already have this option set */
-        const auto ent = std::ranges::find_if(ConfOpts, [&fullKey](const ConfigEntry &entry) ->bool
-        { return entry.key == fullKey; });
+        const auto ent = std::ranges::find(ConfOpts, fullKey, &ConfigEntry::key);
         if(ent != ConfOpts.end())
         {
             if(!valpart.empty())
@@ -309,8 +356,7 @@ auto GetConfigValue(const std::string_view devName, const std::string_view block
     }
     key += keyName;
 
-    const auto iter = std::ranges::find_if(ConfOpts, [&key](const ConfigEntry &entry) -> bool
-    { return entry.key == key; });
+    const auto iter = std::ranges::find(ConfOpts, key, &ConfigEntry::key);
     if(iter != ConfOpts.cend())
     {
         TRACE("Found option {} = \"{}\"", key, iter->value);
@@ -330,12 +376,12 @@ auto GetConfigValue(const std::string_view devName, const std::string_view block
 #ifdef _WIN32
 void ReadALConfig()
 {
-    fs::path path;
+    auto path = fs::path{};
 
 #if !defined(_GAMING_XBOX)
     {
 #if !ALSOFT_UWP
-        auto bufstore = std::unique_ptr<WCHAR,CoTaskMemDeleter>{};
+        auto bufstore = std::unique_ptr<WCHAR, decltype([](WCHAR *mem){ CoTaskMemFree(mem); })>{};
         const auto hr = SHGetKnownFolderPath(FOLDERID_RoamingAppData, KF_FLAG_DONT_UNEXPAND,
             nullptr, al::out_ptr(bufstore));
         if(SUCCEEDED(hr))
@@ -352,7 +398,7 @@ void ReadALConfig()
             path /= L"alsoft.ini";
 
             TRACE("Loading config {}...", al::u8_as_char(path.u8string()));
-            if(fs::ifstream f{path}; f.is_open())
+            if(auto f = fs::ifstream{path}; f.is_open())
                 LoadConfigFromFile(f);
         }
     }
@@ -496,7 +542,10 @@ auto ConfigValueInt(const std::string_view devName, const std::string_view block
     const std::string_view keyName) -> std::optional<int>
 {
     if(auto&& val = GetConfigValue(devName, blockName, keyName); !val.empty()) try {
-        return static_cast<int>(std::stol(val, nullptr, 0));
+        return std::stoi(val, nullptr, 0);
+    }
+    catch(std::out_of_range&) {
+        WARN("Option is out of range of int: {} = {}", keyName, val);
     }
     catch(std::exception&) {
         WARN("Option is not an int: {} = {}", keyName, val);
@@ -509,7 +558,13 @@ auto ConfigValueUInt(const std::string_view devName, const std::string_view bloc
     const std::string_view keyName) -> std::optional<unsigned int>
 {
     if(auto&& val = GetConfigValue(devName, blockName, keyName); !val.empty()) try {
-        return static_cast<unsigned int>(std::stoul(val, nullptr, 0));
+        return gsl::narrow<unsigned int>(std::stoul(val, nullptr, 0));
+    }
+    catch(std::out_of_range&) {
+        WARN("Option is out of range of unsigned int: {} = {}", keyName, val);
+    }
+    catch(gsl::narrowing_error&) {
+        WARN("Option is out of range of unsigned int: {} = {}", keyName, val);
     }
     catch(std::exception&) {
         WARN("Option is not an unsigned int: {} = {}", keyName, val);

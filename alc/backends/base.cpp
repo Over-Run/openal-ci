@@ -11,27 +11,27 @@
 
 
 namespace al {
-auto backend_exception::make_string(fmt::string_view fmt, fmt::format_args args) -> std::string
-{ return fmt::vformat(fmt, std::move(args)); }
 
-backend_exception::~backend_exception() = default;
+auto backend_exception::make_string(std::string_view fmt, std::format_args args) -> std::string
+{ return std::vformat(fmt, std::move(args)); }
+
 } // namespace al
 
 
 bool BackendBase::reset()
 { throw al::backend_exception{al::backend_error::DeviceError, "Invalid BackendBase call"}; }
 
-void BackendBase::captureSamples(std::byte*, uint)
+void BackendBase::captureSamples(std::span<std::byte> outbuffer [[maybe_unused]])
 { }
 
-uint BackendBase::availableSamples()
-{ return 0; }
+auto BackendBase::availableSamples() -> uint
+{ return 0u; }
 
-ClockLatency BackendBase::getClockLatency()
+auto BackendBase::getClockLatency() -> ClockLatency
 {
-    ClockLatency ret{};
+    auto ret = ClockLatency{};
 
-    uint refcount;
+    auto refcount = uint{};
     do {
         refcount = mDevice->waitForMix();
         ret.ClockTime = mDevice->getClockTime();

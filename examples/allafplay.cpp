@@ -51,36 +51,20 @@
  *   separated with audio tracks in between, or from being the first tracks
  *   followed by the audio tracks. It's not known if this is intended to be
  *   allowed, but it's not supported. Object position tracks must be last.
- *
- * Some remaining issues:
- *
- * - There are bursts of static on some channels. This doesn't appear to be a
- *   parsing error since the bursts last less than the chunk size, and it never
- *   loses sync with the remaining chunks. Might be an encoding error with the
- *   files tested.
- *
- * - Positions are specified in left-handed coordinates, despite the LAF
- *   documentation saying it's right-handed. Might be an encoding error with
- *   the files tested, or might be a misunderstanding about which is which. How
- *   to proceed may depend on how wide-spread this issue ends up being, but for
- *   now, they're treated as left-handed here.
- *
- * - The LAF documentation doesn't specify the range or direction for the
- *   channels' X and Y axis rotation in Channels mode. Presumably X rotation
- *   (elevation) goes from -pi/2...+pi/2 and Y rotation (azimuth) goes from
- *   either -pi...+pi or 0...pi*2, but the direction of movement isn't
- *   specified. Currently positive azimuth moves from center rightward and
- *   positive elevation moves from head-level upward.
  */
+
+#include "config.h"
 
 #include <algorithm>
 #include <array>
 #include <bit>
-#include <cassert>
 #include <cstdint>
 #include <fstream>
 #include <functional>
+#include <iostream>
+#include <iterator>
 #include <memory>
+#include <numbers>
 #include <numeric>
 #include <ranges>
 #include <source_location>
@@ -90,22 +74,40 @@
 #include <thread>
 #include <variant>
 #include <vector>
+#ifdef _WIN32
+#include <io.h>
+#include <fcntl.h>
+#endif
+
+#include "alnumeric.h"
+#include "alstring.h"
+#include "common/alhelpers.hpp"
+#include "filesystem.h"
+#include "fmt/base.h"
+#include "fmt/ostream.h"
+#include "fmt/std.h"
+
+#include "win_main_utf8.h"
+
+#if HAVE_CXXMODULES
+import gsl;
+import openal;
+
+#else
 
 #include "AL/alc.h"
 #include "AL/al.h"
 #include "AL/alext.h"
 
-#include "alnumeric.h"
-#include "alstring.h"
-#include "common/alhelpers.h"
-#include "filesystem.h"
-#include "fmt/core.h"
-#include "fmt/ranges.h"
-#include "fmt/std.h"
-
-#include "win_main_utf8.h"
+#include "gsl/gsl"
+#endif
 
 namespace {
+
+using ALCdevicePtr = std::unique_ptr<ALCdevice, decltype([](ALCdevice *device)
+    { alcCloseDevice(device); })>;
+using ALCcontextPtr = std::unique_ptr<ALCcontext, decltype([](ALCcontext *context)
+    { alcDestroyContext(context); })>;
 
 /* Filter object functions */
 auto alGenFilters = LPALGENFILTERS{};
@@ -146,10 +148,45 @@ auto alGetAuxiliaryEffectSlotiv = LPALGETAUXILIARYEFFECTSLOTIV{};
 auto alGetAuxiliaryEffectSlotf = LPALGETAUXILIARYEFFECTSLOTF{};
 auto alGetAuxiliaryEffectSlotfv = LPALGETAUXILIARYEFFECTSLOTFV{};
 
+auto alcRenderSamplesSOFT = LPALCRENDERSAMPLESSOFT{};
+
 
 auto MuteFilterID = ALuint{};
 auto LowFrequencyEffectID = ALuint{};
 auto LfeSlotID = ALuint{};
+
+auto RenderChannels = ALCenum{};
+auto RenderOutMode = ALCenum{};
+auto RenderSamples = ALCenum{};
+auto RenderSampleRate = ALCsizei{};
+auto RenderAmbiOrder = ALCint{};
+
+using ushort = unsigned short;
+using uint = unsigned int;
+
+void fwrite16be(const ushort value, std::ostream &f)
+{
+    auto data = std::bit_cast<std::array<char,2>>(value);
+    if constexpr(std::endian::native != std::endian::big)
+        std::ranges::reverse(data);
+    f.write(data.data(), std::ssize(data));
+}
+
+void fwrite32be(const uint value, std::ostream &f)
+{
+    auto data = std::bit_cast<std::array<char,4>>(value);
+    if constexpr(std::endian::native != std::endian::big)
+        std::ranges::reverse(data);
+    f.write(data.data(), std::ssize(data));
+}
+
+void fwrite64be(const uint64_t value, std::ostream &f)
+{
+    auto data = std::bit_cast<std::array<char,8>>(value);
+    if constexpr(std::endian::native != std::endian::big)
+        std::ranges::reverse(data);
+    f.write(data.data(), std::ssize(data));
+}
 
 
 using namespace std::string_view_literals;
@@ -305,7 +342,7 @@ struct Channel {
     ~Channel()
     {
         if(mSource) alDeleteSources(1, &mSource);
-        if(mBuffers[0]) alDeleteBuffers(ALsizei(mBuffers.size()), mBuffers.data());
+        if(mBuffers[0]) alDeleteBuffers(gsl::narrow<ALsizei>(mBuffers.size()), mBuffers.data());
     }
 
     auto operator=(const Channel&) -> Channel& = delete;
@@ -321,7 +358,7 @@ struct Channel {
 };
 
 struct LafStream {
-    std::filebuf mInFile;
+    std::ifstream mInFile;
 
     Quality mQuality{};
     Mode mMode{};
@@ -363,15 +400,28 @@ struct LafStream {
 auto LafStream::readChunk() -> uint32_t
 {
     auto enableTrackBits = std::array<char,std::tuple_size_v<decltype(mEnabledTracks)>>{};
-    mInFile.sgetn(enableTrackBits.data(), (mNumTracks+7_z)>>3);
+    auto &infile = mInFile.is_open() ? mInFile : std::cin;
+    if(!infile.read(enableTrackBits.data(), gsl::narrow<std::streamsize>((mNumTracks+7u)>>3u)))
+         [[unlikely]]
+    {
+        /* Only print an error when expecting more samples. A sample count of
+         * ~0_u64 indicates unbounded input, which will end when it has nothing
+         * more to give.
+         */
+        if(mSampleCount < ~0_u64 || infile.gcount() != 0)
+            fmt::println(std::cerr, "Premature end of file ({} of {} samples)", mCurrentSample,
+                mSampleCount);
+        mSampleCount = mCurrentSample;
+        return 0u;
+    }
 
     mEnabledTracks = std::bit_cast<decltype(mEnabledTracks)>(enableTrackBits);
-    mNumEnabled = std::accumulate(mEnabledTracks.cbegin(), mEnabledTracks.cend(), 0u,
-        [](const unsigned int val, const uint8_t in) -> unsigned int
-        { return val + unsigned(std::popcount(in)); });
+    mNumEnabled = gsl::narrow<unsigned>(std::accumulate(mEnabledTracks.cbegin(),
+        mEnabledTracks.cend(), 0, [](const int val, const uint8_t in) -> int
+    { return val + std::popcount(in); }));
 
     /* Make sure enable bits aren't set for non-existent tracks. */
-    if(mEnabledTracks[((mNumTracks+7_uz)>>3) - 1] >= (1u<<(mNumTracks&7)))
+    if(mNumEnabled > 0 && mEnabledTracks[((mNumTracks+7_uz)>>3) - 1] >= (1u<<(mNumTracks&7)))
         throw std::runtime_error{"Invalid channel enable bits"};
 
     /* Each chunk is exactly one second long, with samples interleaved for each
@@ -380,14 +430,24 @@ auto LafStream::readChunk() -> uint32_t
      */
     const auto numsamples = std::min(uint64_t{mSampleRate}, mSampleCount-mCurrentSample);
 
-    const auto toread = std::streamsize(numsamples * BytesFromQuality(mQuality) * mNumEnabled);
-    if(mInFile.sgetn(mSampleChunk.data(), toread) != toread)
-        throw std::runtime_error{"Failed to read sample chunk"};
-
+    const auto toread = gsl::narrow<std::streamsize>(numsamples * BytesFromQuality(mQuality)
+        * mNumEnabled);
+    if(!infile.read(mSampleChunk.data(), toread)) [[unlikely]]
+    {
+        const auto framesize = BytesFromQuality(mQuality) * mNumEnabled;
+        const auto samplesread = al::saturate_cast<uint64_t>(infile.gcount()) / framesize;
+        mCurrentSample += samplesread;
+        if(mSampleCount < ~0_u64)
+            fmt::println(std::cerr, "Premature end of file ({} of {} samples)",
+                mCurrentSample, mSampleCount);
+        mSampleCount = mCurrentSample;
+        std::ranges::fill(mSampleChunk | std::views::drop(numsamples*framesize), char{});
+        return gsl::narrow<uint32_t>(samplesread);
+    }
     std::ranges::fill(mSampleChunk | std::views::drop(toread), char{});
 
     mCurrentSample += numsamples;
-    return static_cast<uint32_t>(numsamples);
+    return gsl::narrow<uint32_t>(numsamples);
 }
 
 auto LafStream::prepareTrack(const size_t trackidx, const size_t count) -> std::span<std::byte>
@@ -401,24 +461,24 @@ auto LafStream::prepareTrack(const size_t trackidx, const size_t count) -> std::
         const auto idx = std::invoke([this,trackidx]() -> unsigned int
         {
             const auto bits = std::span{mEnabledTracks}.first(trackidx>>3);
-            const auto res = std::accumulate(bits.begin(), bits.end(), 0u,
-                [](const unsigned int val, const uint8_t in) -> unsigned int
-            { return val + unsigned(std::popcount(in)); });
-            return unsigned(std::popcount(mEnabledTracks[trackidx>>3] & ((1u<<(trackidx&7))-1)))
-                + res;
+            const auto res = std::accumulate(bits.begin(), bits.end(), 0,
+                [](const int val, const uint8_t in) -> int { return val + std::popcount(in); })
+                + std::popcount(mEnabledTracks[trackidx>>3] & ((1u<<(trackidx&7))-1));
+            return gsl::narrow_cast<unsigned>(res);
         });
 
         const auto step = size_t{mNumEnabled};
-        assert(idx < step);
-        return std::visit([=,src=std::span{mSampleChunk}](auto &dst)
+        Expects(idx < step);
+        return std::visit([count,idx,step,src=std::span{mSampleChunk}]<typename T>(T &dst)
         {
-            using sample_t = typename std::remove_cvref_t<decltype(dst)>::value_type;
-            auto inptr = src.begin() + ptrdiff_t(idx*SampleInfo<sample_t>::SrcSize);
+            using sample_t = T::value_type;
+            auto inptr = src.begin();
+            std::advance(inptr, idx*SampleInfo<sample_t>::SrcSize);
             auto output = std::span{dst}.first(count);
             output.front() = SampleInfo<sample_t>::read(inptr);
             std::ranges::generate(output | std::views::drop(1), [&inptr,step]
             {
-                inptr += ptrdiff_t(step*SampleInfo<sample_t>::SrcSize);
+                std::advance(inptr, step*SampleInfo<sample_t>::SrcSize);
                 return SampleInfo<sample_t>::read(inptr);
             });
             return std::as_writable_bytes(output);
@@ -426,9 +486,9 @@ auto LafStream::prepareTrack(const size_t trackidx, const size_t count) -> std::
     }
 
     /* If the track is disabled, provide silence. */
-    return std::visit([todo](auto &dst)
+    return std::visit([todo]<typename T>(T &dst)
     {
-        using sample_t = typename std::remove_cvref_t<decltype(dst)>::value_type;
+        using sample_t = T::value_type;
         std::ranges::fill(dst, sample_t{});
         return std::as_writable_bytes(std::span{dst}.first(todo));
     }, mSampleLine);
@@ -455,19 +515,19 @@ void LafStream::convertPositions(const std::span<float> dst) const
         [dst](const vector<int8_t> &src)
         {
             std::ranges::transform(src, dst.begin(), [](const int8_t in) noexcept -> float
-            { return float(in) / 127.0f; });
+            { return gsl::narrow_cast<float>(in) / 127.0f; });
         },
         [dst](const vector<int16_t> &src)
         {
             std::ranges::transform(src, dst.begin(), [](const int16_t in) noexcept -> float
-            { return float(in) / 32767.0f; });
+            { return gsl::narrow_cast<float>(in) / 32767.0f; });
         },
         [dst](const vector<float> &src) { std::ranges::copy(src, dst.begin()); },
         [dst](const vector<int32_t> &src)
         {
             /* 24-bit samples are converted to 32-bit in copySamples. */
             std::ranges::transform(src, dst.begin(), [](const int32_t in) noexcept -> float
-            { return float(in>>8) / 8388607.0f; });
+            { return gsl::narrow_cast<float>(in>>8) / 8388607.0f; });
         },
     }, mSampleLine);
 }
@@ -475,18 +535,37 @@ void LafStream::convertPositions(const std::span<float> dst) const
 auto LoadLAF(const fs::path &fname) -> std::unique_ptr<LafStream>
 {
     auto laf = std::make_unique<LafStream>();
-    if(!laf->mInFile.open(fname, std::ios_base::binary | std::ios_base::in))
-        throw std::runtime_error{"Could not open file"};
+    auto &infile = std::invoke([&fname,&laf]() -> std::istream&
+    {
+        if(fname == "-")
+        {
+#ifdef _WIN32
+            /* Set stdin to binary mode, so cin's rdbuf will read the file
+             * correctly.
+             */
+            if(_setmode(_fileno(stdin), _O_BINARY) == -1)
+                throw std::runtime_error{"Failed to set stdin to binary mode"};
+#endif
+            return std::cin;
+        }
+
+        laf->mInFile.open(fname, std::ios_base::binary);
+        if(!laf->mInFile.is_open())
+            throw std::runtime_error{"Could not open file"};
+        return laf->mInFile;
+    });
+    /* Throw exceptions if we fail reading the header, so it will skip the file
+     * and go to the next.
+     */
+    infile.exceptions(std::ios_base::eofbit | std::ios_base::failbit | std::ios_base::badbit);
 
     auto marker = std::array<char,9>{};
-    if(laf->mInFile.sgetn(marker.data(), marker.size()) != marker.size())
-        throw std::runtime_error{"Failed to read file marker"};
+    infile.read(marker.data(), marker.size());
     if(std::string_view{marker.data(), marker.size()} != "LIMITLESS"sv)
         throw std::runtime_error{"Not an LAF file"};
 
     auto header = std::array<char,10>{};
-    if(laf->mInFile.sgetn(header.data(), header.size()) != header.size())
-        throw std::runtime_error{"Failed to read header"};
+    infile.read(header.data(), header.size());
     while(std::string_view{header.data(), 4} != "HEAD"sv)
     {
         auto headview = std::string_view{header.data(), header.size()};
@@ -510,9 +589,7 @@ auto LoadLAF(const fs::path &fname) -> std::unique_ptr<LafStream>
         else if(headview.back() == 'H')
             hiter = std::ranges::copy_n(header.end()-1, 1, hiter).out;
 
-        const auto toread = std::distance(hiter, header.end());
-        if(laf->mInFile.sgetn(std::to_address(hiter), toread) != toread)
-            throw std::runtime_error{"Failed to read header"};
+        infile.read(std::to_address(hiter), std::distance(hiter, header.end()));
     }
 
     laf->mQuality = std::invoke([stype=int{header[4]}]
@@ -533,11 +610,11 @@ auto LoadLAF(const fs::path &fname) -> std::unique_ptr<LafStream>
 
     laf->mNumTracks = std::invoke([input=std::span{header}.subspan<6,4>()]
     {
-        return uint32_t{uint8_t(input[0])} | (uint32_t{uint8_t(input[1])}<<8u)
-            | (uint32_t{uint8_t(input[2])}<<16u) | (uint32_t{uint8_t(input[3])}<<24u);
+        return uint32_t{as_unsigned(input[0])} | (uint32_t{as_unsigned(input[1])}<<8u)
+            | (uint32_t{as_unsigned(input[2])}<<16u) | (uint32_t{as_unsigned(input[3])}<<24u);
     });
 
-    fmt::println("Filename: {}", fname.string());
+    fmt::println("Filename: {}", al::u8_as_char(fname.u8string()));
     fmt::println(" quality: {}", GetQualityName(laf->mQuality));
     fmt::println(" mode: {}", GetModeName(laf->mMode));
     fmt::println(" track count: {}", laf->mNumTracks);
@@ -548,9 +625,7 @@ auto LoadLAF(const fs::path &fname) -> std::unique_ptr<LafStream>
         throw std::runtime_error{fmt::format("Too many tracks: {}", laf->mNumTracks)};
 
     auto chandata = std::vector<char>(laf->mNumTracks*9_uz);
-    auto headersize = std::streamsize(chandata.size());
-    if(laf->mInFile.sgetn(chandata.data(), headersize) != headersize)
-        throw std::runtime_error{"Failed to read channel header data"};
+    infile.read(chandata.data(), std::ssize(chandata));
 
     if(laf->mMode == Mode::Channels)
         laf->mChannels.resize(laf->mNumTracks);
@@ -572,8 +647,8 @@ auto LoadLAF(const fs::path &fname) -> std::unique_ptr<LafStream>
 
     static constexpr auto read_float = [](std::span<char,4> input)
     {
-        const auto value = uint32_t{uint8_t(input[0])} | (uint32_t{uint8_t(input[1])}<<8u)
-            | (uint32_t{uint8_t(input[2])}<<16u) | (uint32_t{uint8_t(input[3])}<<24u);
+        const auto value = uint32_t{as_unsigned(input[0])} | (uint32_t{as_unsigned(input[1])}<<8u)
+            | (uint32_t{as_unsigned(input[2])}<<16u) | (uint32_t{as_unsigned(input[3])}<<24u);
         return std::bit_cast<float>(value);
     };
 
@@ -620,29 +695,31 @@ auto LoadLAF(const fs::path &fname) -> std::unique_ptr<LafStream>
         MyAssert(((laf->mChannels.size()-1)>>4) == laf->mPosTracks.size()-1);
 
     auto footer = std::array<char,12>{};
-    if(laf->mInFile.sgetn(footer.data(), footer.size()) != footer.size())
-        throw std::runtime_error{"Failed to read sample header data"};
+    infile.read(footer.data(), footer.size());
 
     laf->mSampleRate = std::invoke([input=std::span{footer}.first<4>()]
     {
-        return uint32_t{uint8_t(input[0])} | (uint32_t{uint8_t(input[1])}<<8u)
-            | (uint32_t{uint8_t(input[2])}<<16u) | (uint32_t{uint8_t(input[3])}<<24u);
+        return uint32_t{as_unsigned(input[0])} | (uint32_t{as_unsigned(input[1])}<<8u)
+            | (uint32_t{as_unsigned(input[2])}<<16u) | (uint32_t{as_unsigned(input[3])}<<24u);
     });
     laf->mSampleCount = std::invoke([input=std::span{footer}.last<8>()]
     {
-        return uint64_t{uint8_t(input[0])} | (uint64_t{uint8_t(input[1])}<<8)
-            | (uint64_t{uint8_t(input[2])}<<16u) | (uint64_t{uint8_t(input[3])}<<24u)
-            | (uint64_t{uint8_t(input[4])}<<32u) | (uint64_t{uint8_t(input[5])}<<40u)
-            | (uint64_t{uint8_t(input[6])}<<48u) | (uint64_t{uint8_t(input[7])}<<56u);
+        return uint64_t{as_unsigned(input[0])} | (uint64_t{as_unsigned(input[1])}<<8)
+            | (uint64_t{as_unsigned(input[2])}<<16u) | (uint64_t{as_unsigned(input[3])}<<24u)
+            | (uint64_t{as_unsigned(input[4])}<<32u) | (uint64_t{as_unsigned(input[5])}<<40u)
+            | (uint64_t{as_unsigned(input[6])}<<48u) | (uint64_t{as_unsigned(input[7])}<<56u);
     });
     fmt::println("Sample rate: {}", laf->mSampleRate);
-    fmt::println("Length: {} samples ({:.2f} sec)", laf->mSampleCount,
-        static_cast<double>(laf->mSampleCount)/static_cast<double>(laf->mSampleRate));
+    if(laf->mSampleCount < ~0_u64)
+        fmt::println("Length: {} samples ({:.2f} sec)", laf->mSampleCount,
+            static_cast<double>(laf->mSampleCount)/static_cast<double>(laf->mSampleRate));
+    else
+        fmt::println("Length: unbounded");
 
     /* Position vectors get split across the PCM chunks if the sample rate
      * isn't a multiple of 48. Each PCM chunk is exactly one second (the sample
      * rate in sample frames). Each track with position data consists of a set
-     * of 3 samples for 16 audio channels, resuling in 48 sample frames for a
+     * of 3 samples for 16 audio channels, resulting in 48 sample frames for a
      * full set of positions. Extra logic will be needed to manage the position
      * frame offset separate from each chunk.
      */
@@ -660,12 +737,14 @@ auto LoadLAF(const fs::path &fname) -> std::unique_ptr<LafStream>
     case Quality::s24: laf->mSampleLine.emplace<std::vector<int32_t>>(laf->mSampleRate); break;
     }
 
+    /* Re-disable exceptions since we'll manually check each read. */
+    infile.exceptions(std::ios_base::goodbit);
     return laf;
 }
 
 void PlayLAF(std::string_view fname)
 try {
-    auto laf = LoadLAF(fs::path(al::char_as_u8(fname)));
+    const auto laf = LoadLAF(fs::path(al::char_as_u8(fname)));
 
     switch(laf->mQuality)
     {
@@ -692,7 +771,7 @@ try {
     std::ranges::for_each(laf->mChannels, [](Channel &channel)
     {
         alGenSources(1, &channel.mSource);
-        alGenBuffers(ALsizei(channel.mBuffers.size()), channel.mBuffers.data());
+        alGenBuffers(gsl::narrow<ALsizei>(channel.mBuffers.size()), channel.mBuffers.data());
 
         /* Disable distance attenuation, and make sure the source stays locked
          * relative to the listener.
@@ -700,12 +779,31 @@ try {
         alSourcef(channel.mSource, AL_ROLLOFF_FACTOR, 0.0f);
         alSourcei(channel.mSource, AL_SOURCE_RELATIVE, AL_TRUE);
 
-        /* FIXME: Is the Y rotation/azimuth clockwise or counter-clockwise?
-         * Does +azimuth move a front sound right or left?
-         */
-        const auto x = std::sin(channel.mAzimuth) * std::cos(channel.mElevation);
-        const auto y = std::sin(channel.mElevation);
-        const auto z = -std::cos(channel.mAzimuth) * std::cos(channel.mElevation);
+        /* Convert degrees to radians, wrapping between -pi...+pi. */
+        auto azi = channel.mAzimuth / 180.0f;
+        /* At this magnitude, the result is always 0. */
+        if(!(std::abs(azi) < 16777216.0f))
+            azi = 0.0f;
+        else
+        {
+            const auto tmp = gsl::narrow_cast<int>(azi);
+            azi -= gsl::narrow_cast<float>(tmp + (tmp%2));
+            azi *= std::numbers::pi_v<float>;
+        }
+
+        auto elev = channel.mElevation / 180.0f;
+        if(!(std::abs(elev) < 16777216.0f))
+            elev = 0.0f;
+        else
+        {
+            const auto tmp = gsl::narrow_cast<int>(elev);
+            elev -= gsl::narrow_cast<float>(tmp + (tmp%2));
+            elev *= std::numbers::pi_v<float>;
+        }
+
+        const auto x = std::sin(azi) * std::cos(elev);
+        const auto y = std::sin(elev);
+        const auto z = -std::cos(azi) * std::cos(elev);
         alSource3f(channel.mSource, AL_POSITION, x, y, z);
 
         if(channel.mIsLfe)
@@ -715,8 +813,8 @@ try {
                 /* For LFE, silence the direct/dry path and connect the LFE aux
                  * slot on send 0.
                  */
-                alSourcei(channel.mSource, AL_DIRECT_FILTER, ALint(MuteFilterID));
-                alSource3i(channel.mSource, AL_AUXILIARY_SEND_FILTER, ALint(LfeSlotID), 0,
+                alSourcei(channel.mSource, AL_DIRECT_FILTER, as_signed(MuteFilterID));
+                alSource3i(channel.mSource, AL_AUXILIARY_SEND_FILTER, as_signed(LfeSlotID), 0,
                     AL_FILTER_NULL);
             }
             else
@@ -732,6 +830,170 @@ try {
         if(const auto err = alGetError())
             throw std::runtime_error{fmt::format("OpenAL error: {}", alGetString(err))};
     });
+
+    auto renderFile = std::ofstream{};
+    auto renderStart = std::streamoff{};
+    auto leadIn = 0_z;
+    auto leadOut = 0_z;
+    auto renderbuf = std::vector<char>{};
+    if(alcRenderSamplesSOFT)
+    {
+        auto *device = alcGetContextsDevice(alcGetCurrentContext());
+
+        const auto chancount = std::invoke([]() -> uint
+        {
+            switch(RenderChannels)
+            {
+            case ALC_MONO_SOFT: return 1u;
+            case ALC_STEREO_SOFT: return 2u;
+            case ALC_QUAD_SOFT: return 4u;
+            case ALC_SURROUND_5_1_SOFT: return 6u;
+            case ALC_SURROUND_6_1_SOFT: return 7u;
+            case ALC_SURROUND_7_1_SOFT: return 8u;
+            case ALC_BFORMAT3D_SOFT:
+                return gsl::narrow<uint>((RenderAmbiOrder+1)*(RenderAmbiOrder+1));
+            default:
+                throw std::runtime_error{fmt::format("Unexpected channel enum: {:#x}",
+                    RenderChannels)};
+            }
+        });
+
+        const auto samplesize = std::invoke([]() -> uint
+        {
+            switch(RenderSamples)
+            {
+            case ALC_UNSIGNED_BYTE_SOFT: return 1u;
+            case ALC_BYTE_SOFT: return 1u;
+            case ALC_UNSIGNED_SHORT_SOFT: return 2u;
+            case ALC_SHORT_SOFT: return 2u;
+            case ALC_UNSIGNED_INT_SOFT: return 4u;
+            case ALC_INT_SOFT: return 4u;
+            case ALC_FLOAT_SOFT: return 4u;
+            default:
+                throw std::runtime_error{fmt::format("Unexpected sample type enum: {:#x}",
+                    RenderSamples)};
+            }
+        });
+        const auto framesize = size_t{chancount} * samplesize;
+        renderbuf.resize(framesize * FramesPerPos);
+
+        if(std::cmp_not_equal(RenderSampleRate, laf->mSampleRate))
+        {
+            /* NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) */
+            const auto alcResetDeviceSOFT = reinterpret_cast<LPALCRESETDEVICESOFT>(
+                alcGetProcAddress(nullptr, "alcResetDeviceSOFT"));
+
+            const auto attribs = std::to_array<ALCint>({
+                ALC_FREQUENCY, gsl::narrow<int>(laf->mSampleRate),
+                ALC_FORMAT_CHANNELS_SOFT, RenderChannels,
+                ALC_FORMAT_TYPE_SOFT, RenderSamples,
+                ALC_OUTPUT_MODE_SOFT, RenderOutMode,
+                ALC_AMBISONIC_LAYOUT_SOFT, ALC_ACN_SOFT,
+                ALC_AMBISONIC_SCALING_SOFT, ALC_SN3D_SOFT,
+                ALC_AMBISONIC_ORDER_SOFT, RenderAmbiOrder,
+                0});
+            if(!alcResetDeviceSOFT(device, attribs.data()))
+                throw std::runtime_error{fmt::format(
+                    "Failed to reset loopback device for {}hz rendering", RenderSampleRate)};
+            RenderSampleRate = gsl::narrow_cast<int>(laf->mSampleRate);
+        }
+
+        if(alcIsExtensionPresent(device, "ALC_SOFT_device_clock"))
+        {
+            /* NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) */
+            const auto alcGetInteger64vSOFT = reinterpret_cast<LPALCGETINTEGER64VSOFT>(
+                alcGetProcAddress(device, "alcGetInteger64vSOFT"));
+
+            auto latency = ALCint64SOFT{};
+            alcGetInteger64vSOFT(device, ALC_DEVICE_LATENCY_SOFT, 1, &latency);
+            std::ignore = alcGetError(device);
+
+            leadIn = latency * RenderSampleRate / 1'000'000'000
+                * gsl::narrow_cast<int>(framesize);
+            leadOut = (latency*RenderSampleRate + 999'999'999) / 1'000'000'000
+                * gsl::narrow_cast<int>(framesize);
+        }
+
+        auto outname = fs::path(al::char_as_u8(fname)).stem();
+        outname += u8".caf";
+        if(fs::exists(outname) && !fs::is_fifo(outname))
+            throw std::runtime_error{fmt::format("Output file {} exists", outname)};
+
+        renderFile.open(outname, std::ios_base::binary | std::ios_base::out);
+        if(!renderFile.is_open())
+            throw std::runtime_error{fmt::format("Failed to create {}", outname)};
+
+        renderFile.write("caff", 4);
+        fwrite16be(1, renderFile);
+        fwrite16be(0, renderFile);
+
+        renderFile.write("desc", 4);
+        fwrite64be(32, renderFile);
+        fwrite64be(std::bit_cast<uint64_t>(gsl::narrow_cast<double>(RenderSampleRate)),renderFile);
+        renderFile.write("lpcm", 4);
+
+        const auto flags = std::invoke([]
+        {
+            switch(RenderSamples)
+            {
+            case ALC_UNSIGNED_BYTE_SOFT:
+            case ALC_BYTE_SOFT:
+                break;
+            case ALC_UNSIGNED_SHORT_SOFT:
+            case ALC_SHORT_SOFT:
+            case ALC_UNSIGNED_INT_SOFT:
+            case ALC_INT_SOFT:
+                if constexpr(std::endian::native == std::endian::little)
+                    return 2u; /* kCAFLinearPCMFormatFlagIsLittleEndian */
+                else
+                    break;
+            case ALC_FLOAT_SOFT:
+                if constexpr(std::endian::native == std::endian::little)
+                    return 3u; /* kCAFLinearPCMFormatFlagIsFloat | kCAFLinearPCMFormatFlagIsLittleEndian */
+                else
+                    return 1u; /* kCAFLinearPCMFormatFlagIsFloat */
+            }
+            return 0u;
+        });
+        fwrite32be(flags, renderFile);
+        fwrite32be(samplesize*chancount, renderFile);
+        fwrite32be(1, renderFile);
+        fwrite32be(chancount, renderFile);
+        fwrite32be(samplesize*8, renderFile);
+
+        const auto chanmask = std::invoke([]
+        {
+            switch(RenderChannels)
+            {
+            case ALC_MONO_SOFT: return 0x4u;
+            case ALC_STEREO_SOFT: return 0x1u | 0x2u;
+            case ALC_QUAD_SOFT: return 0x1u | 0x2u | 0x10u | 0x20u;
+            case ALC_SURROUND_5_1_SOFT: return 0x1u | 0x2u | 0x4u | 0x8u | 0x200u | 0x400u;
+            case ALC_SURROUND_6_1_SOFT: return 0x1u | 0x2u | 0x4u | 0x8u | 0x100u | 0x200u | 0x400u;
+            case ALC_SURROUND_7_1_SOFT: return 0x1u | 0x2u | 0x4u | 0x8u | 0x10u | 0x20u | 0x200u | 0x400u;
+            case ALC_BFORMAT3D_SOFT: return 0u;
+            default:
+                throw std::runtime_error{fmt::format("Unexpected channel enum: {:#x}",
+                    RenderChannels)};
+            }
+        });
+        if(chanmask)
+        {
+            renderFile.write("chan", 4);
+            fwrite64be(12, renderFile);
+            fwrite32be(0x10000, renderFile); /* kCAFChannelLayoutTag_UseChannelBitmap */
+            fwrite32be(chanmask, renderFile);
+            fwrite32be(0, renderFile);
+        }
+
+        renderFile.write("data", 4);
+        fwrite64be(~0_u64, renderFile); /* filled in at stop */
+
+        renderStart = renderFile.tellp();
+        fwrite32be(0, renderFile);
+
+        fmt::println("Rendering to {}...", outname);
+    }
 
     while(!laf->isAtEnd())
     {
@@ -757,18 +1019,16 @@ try {
             if(!laf->mPosTracks.empty())
             {
                 alcSuspendContext(alcGetCurrentContext());
-                for(auto i = 0_uz;i < laf->mChannels.size();++i)
+                for(const auto i : std::views::iota(0_uz, laf->mChannels.size()))
                 {
                     const auto trackidx = i>>4;
 
-                    const auto posoffset = unsigned(offset)/FramesPerPos*16_uz + (i&15);
+                    const auto posoffset = gsl::narrow<ALuint>(offset)/FramesPerPos*16_uz + (i&15);
                     const auto x = laf->mPosTracks[trackidx][posoffset*3 + 0];
                     const auto y = laf->mPosTracks[trackidx][posoffset*3 + 1];
                     const auto z = laf->mPosTracks[trackidx][posoffset*3 + 2];
 
-                    /* Contrary to the docs, the position is left-handed and
-                     * needs to be converted to right-handed.
-                     */
+                    /* Convert left-handed coords to right-handed. */
                     alSource3f(laf->mChannels[i].mSource, AL_POSITION, x, y, -z);
                 }
                 alcProcessContext(alcGetCurrentContext());
@@ -780,18 +1040,19 @@ try {
             if(processed > 0)
             {
                 const auto numsamples = laf->readChunk();
-                for(auto i = 0_uz;i < laf->mChannels.size();++i)
+                for(const auto i : std::views::iota(0_uz, laf->mChannels.size()))
                 {
                     const auto samples = laf->prepareTrack(i, numsamples);
                     laf->convertSamples(samples);
 
                     auto bufid = ALuint{};
                     alSourceUnqueueBuffers(laf->mChannels[i].mSource, 1, &bufid);
-                    alBufferData(bufid, laf->mALFormat, samples.data(), ALsizei(samples.size()),
-                        ALsizei(laf->mSampleRate));
+                    alBufferData(bufid, laf->mALFormat, samples.data(),
+                        gsl::narrow<ALsizei>(samples.size()),
+                        gsl::narrow<ALsizei>(laf->mSampleRate));
                     alSourceQueueBuffers(laf->mChannels[i].mSource, 1, &bufid);
                 }
-                for(auto i = 0_uz;i < laf->mPosTracks.size();++i)
+                for(const auto i : std::views::iota(0_uz, laf->mPosTracks.size()))
                 {
                     std::ranges::copy(laf->mPosTracks[i] | std::views::drop(laf->mSampleRate),
                         laf->mPosTracks[i].begin());
@@ -799,6 +1060,21 @@ try {
                     std::ignore = laf->prepareTrack(laf->mChannels.size()+i, numsamples);
                     laf->convertPositions(std::span{laf->mPosTracks[i]}.last(laf->mSampleRate));
                 }
+            }
+            else if(alcRenderSamplesSOFT)
+            {
+                alcRenderSamplesSOFT(alcGetContextsDevice(alcGetCurrentContext()),
+                    renderbuf.data(), FramesPerPos);
+                if(leadIn >= std::ssize(renderbuf))
+                    leadIn -= std::ssize(renderbuf);
+                else if(leadIn > 0)
+                {
+                    const auto out = renderbuf | std::views::drop(leadIn);
+                    renderFile.write(out.data(), std::ssize(out));
+                    leadIn = 0;
+                }
+                else
+                    renderFile.write(renderbuf.data(), std::ssize(renderbuf));
             }
             else
                 std::this_thread::sleep_for(std::chrono::milliseconds{10});
@@ -812,7 +1088,7 @@ try {
              */
             auto sources = std::array<ALuint,256_uz>{};
             std::ranges::transform(laf->mChannels, sources.begin(), &Channel::mSource);
-            alSourcePlayv(ALsizei(laf->mChannels.size()), sources.data());
+            alSourcePlayv(gsl::narrow<ALsizei>(laf->mChannels.size()), sources.data());
         }
         else if(state == AL_INITIAL)
         {
@@ -821,30 +1097,33 @@ try {
              * position vectors).
              */
             auto numsamples = laf->readChunk();
-            for(auto i = 0_uz;i < laf->mChannels.size();++i)
+            for(const auto i : std::views::iota(0_uz, laf->mChannels.size()))
             {
                 const auto samples = laf->prepareTrack(i, numsamples);
                 laf->convertSamples(samples);
                 alBufferData(laf->mChannels[i].mBuffers[0], laf->mALFormat, samples.data(),
-                    ALsizei(samples.size()), ALsizei(laf->mSampleRate));
+                    gsl::narrow<ALsizei>(samples.size()),
+                    gsl::narrow<ALsizei>(laf->mSampleRate));
             }
-            for(auto i = 0_uz;i < laf->mPosTracks.size();++i)
+            for(const auto i : std::views::iota(0_uz, laf->mPosTracks.size()))
             {
                 std::ignore = laf->prepareTrack(laf->mChannels.size()+i, numsamples);
                 laf->convertPositions(std::span{laf->mPosTracks[i]}.first(laf->mSampleRate));
             }
 
             numsamples = laf->readChunk();
-            for(auto i = 0_uz;i < laf->mChannels.size();++i)
+            for(const auto i : std::views::iota(0_uz, laf->mChannels.size()))
             {
                 const auto samples = laf->prepareTrack(i, numsamples);
                 laf->convertSamples(samples);
                 alBufferData(laf->mChannels[i].mBuffers[1], laf->mALFormat, samples.data(),
-                    ALsizei(samples.size()), ALsizei(laf->mSampleRate));
+                    gsl::narrow<ALsizei>(samples.size()),
+                    gsl::narrow<ALsizei>(laf->mSampleRate));
                 alSourceQueueBuffers(laf->mChannels[i].mSource,
-                    ALsizei(laf->mChannels[i].mBuffers.size()), laf->mChannels[i].mBuffers.data());
+                    gsl::narrow<ALsizei>(laf->mChannels[i].mBuffers.size()),
+                    laf->mChannels[i].mBuffers.data());
             }
-            for(auto i = 0_uz;i < laf->mPosTracks.size();++i)
+            for(const auto i : std::views::iota(0_uz, laf->mPosTracks.size()))
             {
                 std::ignore = laf->prepareTrack(laf->mChannels.size()+i, numsamples);
                 laf->convertPositions(std::span{laf->mPosTracks[i]}.last(laf->mSampleRate));
@@ -855,7 +1134,7 @@ try {
              */
             if(!laf->mPosTracks.empty())
             {
-                for(size_t i{0};i < laf->mChannels.size();++i)
+                for(const auto i : std::views::iota(0_uz, laf->mChannels.size()))
                 {
                     const auto trackidx = i>>4;
 
@@ -869,7 +1148,7 @@ try {
 
             auto sources = std::array<ALuint,256_uz>{};
             std::ranges::transform(laf->mChannels, sources.begin(), &Channel::mSource);
-            alSourcePlayv(ALsizei(laf->mChannels.size()), sources.data());
+            alSourcePlayv(gsl::narrow<ALsizei>(laf->mChannels.size()), sources.data());
         }
         else
             break;
@@ -888,7 +1167,7 @@ try {
             {
                 const auto trackidx = i>>4;
 
-                const auto posoffset = unsigned(offset)/FramesPerPos*16_uz + (i&15);
+                const auto posoffset = gsl::narrow<ALuint>(offset)/FramesPerPos*16_uz + (i&15);
                 const auto x = laf->mPosTracks[trackidx][posoffset*3 + 0];
                 const auto y = laf->mPosTracks[trackidx][posoffset*3 + 1];
                 const auto z = laf->mPosTracks[trackidx][posoffset*3 + 2];
@@ -897,13 +1176,52 @@ try {
             }
             alcProcessContext(alcGetCurrentContext());
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+        if(alcRenderSamplesSOFT)
+        {
+            alcRenderSamplesSOFT(alcGetContextsDevice(alcGetCurrentContext()),
+                renderbuf.data(), FramesPerPos);
+            if(leadIn > std::ssize(renderbuf))
+                leadIn -= std::ssize(renderbuf);
+            else if(leadIn > 0)
+            {
+                const auto out = renderbuf | std::views::drop(leadIn);
+                renderFile.write(out.data(), std::ssize(out));
+                leadIn = 0;
+            }
+            else
+                renderFile.write(renderbuf.data(), std::ssize(renderbuf));
+        }
+        else
+            std::this_thread::sleep_for(std::chrono::milliseconds{10});
         alGetSourcei(laf->mChannels.back().mSource, AL_SAMPLE_OFFSET, &offset);
         alGetSourcei(laf->mChannels.back().mSource, AL_SOURCE_STATE, &state);
     }
+
+    while(leadOut > 0)
+    {
+        alcRenderSamplesSOFT(alcGetContextsDevice(alcGetCurrentContext()),
+            renderbuf.data(), FramesPerPos);
+        const auto todo = std::min(std::ssize(renderbuf), leadOut);
+        renderFile.write(renderbuf.data(), todo);
+        leadOut -= todo;
+    }
+
+    if(renderStart > 0)
+    {
+        const auto renderEnd = std::streamoff{renderFile.tellp()};
+        if(renderEnd > renderStart)
+        {
+            const auto dataLen = renderEnd - renderStart;
+            if(renderFile.seekp(renderStart-8))
+            {
+                fwrite64be(gsl::narrow<uint64_t>(dataLen), renderFile);
+                renderFile.seekp(0, std::ios_base::end);
+            }
+        }
+    }
 }
 catch(std::exception& e) {
-    fmt::println(stderr, "Error playing {}:\n  {}", fname, e.what());
+    fmt::println(std::cerr, "Error playing {}:\n  {}", fname, e.what());
 }
 
 auto main(std::span<std::string_view> args) -> int
@@ -911,40 +1229,191 @@ auto main(std::span<std::string_view> args) -> int
     /* Print out usage if no arguments were specified */
     if(args.size() < 2)
     {
-        fmt::println(stderr, "Usage: {} [-device <name>] <filenames...>\n", args[0]);
+        fmt::println(std::cerr,
+            "Usage: {} [-device <name>] [-render <channels,samples>] <filenames...>\n"
+            "\n"
+            "  -render   Renders samples to an output file instead of real-time playback.\n"
+            "            Outputs a CAF file with the same name as the input, but with the\n"
+            "            \"caf\" extension.\n"
+            "            Available channels: mono, stereo, hrtf, uhj, quad, surround51,\n"
+            "                                surround61, surround71, ambi1, ambi2, ambi3,\n"
+            "                                ambi4\n"
+            "            Available samples: s16, f32",
+            args[0]);
         return 1;
     }
     args = args.subspan(1);
 
-    if(InitAL(args) != 0)
-        throw std::runtime_error{"Failed to initialize OpenAL"};
-    /* A simple RAII container for automating OpenAL shutdown. */
-    struct AudioManager {
-        AudioManager() = default;
-        AudioManager(const AudioManager&) = delete;
-        auto operator=(const AudioManager&) -> AudioManager& = delete;
-        ~AudioManager()
-        {
-            if(LfeSlotID)
-            {
-                alDeleteAuxiliaryEffectSlots(1, &LfeSlotID);
-                alDeleteEffects(1, &LowFrequencyEffectID);
-                alDeleteFilters(1, &MuteFilterID);
-            }
-            CloseAL();
-        }
-    };
-    auto almgr = AudioManager{};
+    auto almgr = InitAL(args);
+    almgr.printName();
 
-    if(auto *device = alcGetContextsDevice(alcGetCurrentContext());
-        alcIsExtensionPresent(device, "ALC_EXT_EFX")
-        && alcIsExtensionPresent(device, "ALC_EXT_DEDICATED"))
+    if(!args.empty() && args[0] == "-render")
     {
-#define LOAD_PROC(x) do {                                                     \
-        x = reinterpret_cast<decltype(x)>(alGetProcAddress(#x));              \
-        if(!x) fmt::println(stderr, "Failed to find function '{}'", #x##sv);  \
-    } while(0)
+        if(args.size() < 2)
+        {
+            fmt::println(std::cerr, "Missing -render format");
+            return 1;
+        }
+        auto params = std::vector<std::string>{};
+        std::ranges::transform(args[1] | std::views::split(','), std::back_inserter(params),
+            [](auto prange) { return std::string(prange.begin(), prange.end()); });
+        if(params.size() != 2)
+        {
+            fmt::println(std::cerr, "Invalid -render argument: {}", args[1]);
+            return 1;
+        }
+        args = args.subspan(2);
+
+        RenderOutMode = ALC_ANY_SOFT;
+        RenderAmbiOrder = 0;
+        if(al::case_compare(params[0], "mono") == 0)
+            RenderChannels = ALC_MONO_SOFT;
+        else if(al::case_compare(params[0], "stereo") == 0)
+        {
+            RenderChannels = ALC_STEREO_SOFT;
+            RenderOutMode = ALC_STEREO_BASIC_SOFT;
+        }
+        else if(al::case_compare(params[0], "hrtf") == 0)
+        {
+            RenderChannels = ALC_STEREO_SOFT;
+            RenderOutMode = ALC_STEREO_HRTF_SOFT;
+        }
+        else if(al::case_compare(params[0], "uhj") == 0)
+        {
+            RenderChannels = ALC_STEREO_SOFT;
+            RenderOutMode = ALC_STEREO_UHJ_SOFT;
+        }
+        else if(al::case_compare(params[0], "quad") == 0)
+            RenderChannels = ALC_QUAD_SOFT;
+        else if(al::case_compare(params[0], "surround51") == 0)
+            RenderChannels = ALC_SURROUND_5_1_SOFT;
+        else if(al::case_compare(params[0], "surround61") == 0)
+            RenderChannels = ALC_SURROUND_6_1_SOFT;
+        else if(al::case_compare(params[0], "surround71") == 0)
+            RenderChannels = ALC_SURROUND_7_1_SOFT;
+        else if(al::case_compare(params[0], "ambi1") == 0)
+        {
+            RenderChannels = ALC_BFORMAT3D_SOFT;
+            RenderAmbiOrder = 1;
+        }
+        else if(al::case_compare(params[0], "ambi2") == 0)
+        {
+            RenderChannels = ALC_BFORMAT3D_SOFT;
+            RenderAmbiOrder = 2;
+        }
+        else if(al::case_compare(params[0], "ambi3") == 0)
+        {
+            RenderChannels = ALC_BFORMAT3D_SOFT;
+            RenderAmbiOrder = 3;
+        }
+        else if(al::case_compare(params[0], "ambi4") == 0)
+        {
+            RenderChannels = ALC_BFORMAT3D_SOFT;
+            RenderAmbiOrder = 4;
+        }
+        else
+        {
+            fmt::println(std::cerr, "Unsupported channel configuration: {}", params[0]);
+            return 1;
+        }
+
+        if(al::case_compare(params[1], "f32") == 0)
+            RenderSamples = ALC_FLOAT_SOFT;
+        else if(al::case_compare(params[1], "s16") == 0)
+            RenderSamples = ALC_SHORT_SOFT;
+        else
+        {
+            fmt::println(std::cerr, "Unsupported sample type: {}", params[1]);
+            return 1;
+        }
+
+        RenderSampleRate = 48000;
+
+        if(!alcIsExtensionPresent(nullptr, "ALC_SOFT_loopback"))
+        {
+            fmt::println(std::cerr, "Loopback rendering not supported");
+            return 1;
+        }
+
         /* NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast) */
+        const auto alcLoopbackOpenDevice = reinterpret_cast<LPALCLOOPBACKOPENDEVICESOFT>(
+            alcGetProcAddress(nullptr, "alcLoopbackOpenDeviceSOFT"));
+        const auto alcIsRenderFormatSupported = reinterpret_cast<LPALCISRENDERFORMATSUPPORTEDSOFT>(
+            alcGetProcAddress(nullptr, "alcIsRenderFormatSupportedSOFT"));
+        alcRenderSamplesSOFT = reinterpret_cast<LPALCRENDERSAMPLESSOFT>(
+            alcGetProcAddress(nullptr, "alcRenderSamplesSOFT"));
+        /* NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast) */
+
+        auto loopbackDev = ALCdevicePtr{alcLoopbackOpenDevice(nullptr)};
+        if(!loopbackDev)
+        {
+            fmt::println(std::cerr, "Failed to open loopback device: {:x}", alcGetError(nullptr));
+            return 1;
+        }
+
+        if(!alcIsRenderFormatSupported(loopbackDev.get(), RenderSampleRate, RenderChannels,
+            RenderSamples))
+        {
+            fmt::println(std::cerr, "Format {},{} @ {}hz not supported", params[0], params[1],
+                RenderSampleRate);
+            return 1;
+        }
+        if(RenderAmbiOrder > 0)
+        {
+            auto maxorder = ALCint{};
+            if(alcIsExtensionPresent(loopbackDev.get(), "ALC_SOFT_loopback_bformat"))
+                alcGetIntegerv(loopbackDev.get(), ALC_MAX_AMBISONIC_ORDER_SOFT, 1, &maxorder);
+            if(RenderAmbiOrder > maxorder)
+            {
+                fmt::println(std::cerr, "Unsupported ambisonic order: {} (max: {})",
+                    RenderAmbiOrder, maxorder);
+                return 1;
+            }
+        }
+
+        const auto attribs = std::to_array<ALCint>({
+            ALC_FREQUENCY, RenderSampleRate,
+            ALC_FORMAT_CHANNELS_SOFT, RenderChannels,
+            ALC_FORMAT_TYPE_SOFT, RenderSamples,
+            ALC_OUTPUT_MODE_SOFT, RenderOutMode,
+            ALC_AMBISONIC_LAYOUT_SOFT, ALC_ACN_SOFT,
+            ALC_AMBISONIC_SCALING_SOFT, ALC_SN3D_SOFT,
+            ALC_AMBISONIC_ORDER_SOFT, RenderAmbiOrder,
+            0});
+        auto loopbackCtx = ALCcontextPtr{alcCreateContext(loopbackDev.get(), attribs.data())};
+        if(!loopbackCtx || alcMakeContextCurrent(loopbackCtx.get()) == ALC_FALSE)
+        {
+            fmt::println(std::cerr, "Failed to create loopback device context: {:x}",
+                alcGetError(loopbackDev.get()));
+            return 1;
+        }
+
+        almgr.close();
+        almgr.device = loopbackDev.release();
+        almgr.context = loopbackCtx.release();
+    }
+
+    /* Automate effect cleanup at end of scope (before almgr destructs). */
+    const auto _ = gsl::finally([]
+    {
+        if(LfeSlotID)
+        {
+            alDeleteAuxiliaryEffectSlots(1, &LfeSlotID);
+            alDeleteEffects(1, &LowFrequencyEffectID);
+            alDeleteFilters(1, &MuteFilterID);
+        }
+    });
+
+    if(alcIsExtensionPresent(almgr.device, "ALC_EXT_EFX")
+        && alcIsExtensionPresent(almgr.device, "ALC_EXT_DEDICATED"))
+    {
+        static constexpr auto load_proc = []<typename T>(T &func, gsl::czstring funcname)
+        {
+            /* NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) */
+            func = reinterpret_cast<T>(alGetProcAddress(funcname));
+            if(!func) fmt::println(std::cerr, "Failed to find function '{}'", funcname);
+        };
+#define LOAD_PROC(x) load_proc(x, #x)
         LOAD_PROC(alGenFilters);
         LOAD_PROC(alDeleteFilters);
         LOAD_PROC(alIsFilter);
@@ -978,7 +1447,6 @@ auto main(std::span<std::string_view> args) -> int
         LOAD_PROC(alGetAuxiliaryEffectSlotfv);
         LOAD_PROC(alGetAuxiliaryEffectSloti);
         LOAD_PROC(alGetAuxiliaryEffectSlotiv);
-        /* NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast) */
 #undef LOAD_PROC
 
         alGenFilters(1, &MuteFilterID);
@@ -991,7 +1459,7 @@ auto main(std::span<std::string_view> args) -> int
         MyAssert(alGetError() == AL_NO_ERROR);
 
         alGenAuxiliaryEffectSlots(1, &LfeSlotID);
-        alAuxiliaryEffectSloti(LfeSlotID, AL_EFFECTSLOT_EFFECT, ALint(LowFrequencyEffectID));
+        alAuxiliaryEffectSloti(LfeSlotID, AL_EFFECTSLOT_EFFECT, as_signed(LowFrequencyEffectID));
         MyAssert(alGetError() == AL_NO_ERROR);
     }
 
@@ -1002,10 +1470,9 @@ auto main(std::span<std::string_view> args) -> int
 
 } // namespace
 
-int main(int argc, char **argv)
+auto main(int argc, char **argv) -> int
 {
-    MyAssert(argc >= 0);
-    auto args = std::vector<std::string_view>(static_cast<unsigned int>(argc));
+    auto args = std::vector<std::string_view>(gsl::narrow<unsigned int>(argc));
     std::ranges::copy(std::views::counted(argv, argc), args.begin());
     return main(std::span{args});
 }

@@ -5,23 +5,28 @@
 #include <atomic>
 #include <bitset>
 #include <chrono>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <format>
+#include <functional>
 #include <memory>
+#include <ranges>
 #include <span>
 #include <string>
+#include <variant>
 
 #include "almalloc.h"
+#include "alnumeric.h"
 #include "ambidefs.h"
 #include "atomic.h"
 #include "bufferline.h"
 #include "devformat.h"
 #include "filters/nfc.h"
 #include "flexarray.h"
-#include "fmt/core.h"
+#include "gsl/gsl"
 #include "intrusive_ptr.h"
 #include "mixer/hrtfdefs.h"
-#include "opthelpers.h"
 #include "resampler_limits.h"
 #include "uhjfilter.h"
 #include "vector.h"
@@ -32,18 +37,19 @@ struct bs2b;
 } // namespace Bs2b
 class Compressor;
 struct ContextBase;
-struct DirectHrtfState;
+class DirectHrtfState;
+class FrontStablizer;
 struct HrtfStore;
 
 using uint = unsigned int;
 
 
-inline constexpr std::size_t MinOutputRate{8000};
-inline constexpr std::size_t MaxOutputRate{192000};
-inline constexpr std::size_t DefaultOutputRate{48000};
+inline constexpr auto MinOutputRate = 8000_uz;
+inline constexpr auto MaxOutputRate = 192000_uz;
+inline constexpr auto DefaultOutputRate = 48000_uz;
 
-inline constexpr std::size_t DefaultUpdateSize{960}; /* 20ms */
-inline constexpr std::size_t DefaultNumUpdates{3};
+inline constexpr auto DefaultUpdateSize = 512_uz; /* ~10.7ms */
+inline constexpr auto DefaultNumUpdates = 3_uz;
 
 
 enum class DeviceType : std::uint8_t {
@@ -76,7 +82,10 @@ struct InputRemixMap {
 };
 
 
-struct DistanceComp {
+class DistanceComp {
+    explicit DistanceComp(const std::size_t count) : mSamples{count} { }
+
+public:
     /* Maximum delay in samples for speaker distance compensation. */
     static constexpr uint MaxDelay{1024};
 
@@ -85,19 +94,17 @@ struct DistanceComp {
         float Gain{1.0f};
     };
 
-    std::array<ChanData,MaxOutputChannels> mChannels;
+    std::array<ChanData,MaxOutputChannels> mChannels{};
     al::FlexArray<float,16> mSamples;
 
-    explicit DistanceComp(std::size_t count) : mSamples{count} { }
-
-    static std::unique_ptr<DistanceComp> Create(std::size_t numsamples)
-    { return std::unique_ptr<DistanceComp>{new(FamCount(numsamples)) DistanceComp{numsamples}}; }
+    static auto Create(std::size_t numsamples) -> std::unique_ptr<DistanceComp>
+    { return std::unique_ptr<DistanceComp>{new(FamCount{numsamples}) DistanceComp{numsamples}}; }
 
     DEF_FAM_NEWDEL(DistanceComp, mSamples)
 };
 
 
-constexpr auto InvalidChannelIndex = static_cast<std::uint8_t>(~0u);
+constexpr auto InvalidChannelIndex = gsl::narrow_cast<std::uint8_t>(~0u);
 
 struct BFChannelConfig {
     float Scale;
@@ -118,26 +125,26 @@ struct MixParams {
      * destination channel is InvalidChannelIndex, the given source channel is
      * not used for output.
      */
-    template<typename F>
+    template<std::invocable<std::size_t,std::uint8_t,float> F>
     void setAmbiMixParams(const MixParams &inmix, const float gainbase, F func) const
     {
-        const std::size_t numIn{inmix.Buffer.size()};
-        const std::size_t numOut{Buffer.size()};
-        for(std::size_t i{0};i < numIn;++i)
+        const auto numIn = inmix.Buffer.size();
+        const auto numOut = Buffer.size();
+        for(const auto i : std::views::iota(0_uz, numIn))
         {
-            std::uint8_t idx{InvalidChannelIndex};
-            float gain{0.0f};
+            auto idx = InvalidChannelIndex;
+            auto gain = 0.0f;
 
-            for(std::size_t j{0};j < numOut;++j)
+            for(const auto j : std::views::iota(0_uz, numOut))
             {
                 if(AmbiMap[j].Index == inmix.AmbiMap[i].Index)
                 {
-                    idx = static_cast<std::uint8_t>(j);
+                    idx = gsl::narrow_cast<std::uint8_t>(j);
                     gain = AmbiMap[j].Scale * gainbase;
                     break;
                 }
             }
-            func(i, idx, gain);
+            std::invoke(func, i, idx, gain);
         }
     }
 };
@@ -150,6 +157,37 @@ struct RealMixParams {
 };
 
 using AmbiRotateMatrix = std::array<std::array<float,MaxAmbiChannels>,MaxAmbiChannels>;
+
+
+struct AmbiDecPostProcess {
+    std::unique_ptr<BFormatDec> mAmbiDecoder;
+};
+
+struct HrtfPostProcess {
+    std::unique_ptr<DirectHrtfState> mHrtfState;
+};
+
+struct UhjPostProcess {
+    std::unique_ptr<UhjEncoderBase> mUhjEncoder;
+};
+
+struct StablizerPostProcess {
+    std::unique_ptr<BFormatDec> mAmbiDecoder;
+    std::unique_ptr<FrontStablizer> mStablizer;
+};
+
+struct Bs2bPostProcess {
+    std::unique_ptr<BFormatDec> mAmbiDecoder;
+    std::unique_ptr<Bs2b::bs2b> mBs2b;
+};
+
+using PostProcess = std::variant<std::monostate,
+    AmbiDecPostProcess,
+    HrtfPostProcess,
+    UhjPostProcess,
+    StablizerPostProcess,
+    Bs2bPostProcess>;
+
 
 enum {
     // Frequency was requested by the app or config file
@@ -181,7 +219,7 @@ enum class DeviceState : std::uint8_t {
 };
 
 /* NOLINTNEXTLINE(clang-analyzer-optin.performance.Padding) */
-struct SIMDALIGN DeviceBase {
+struct DeviceBase {
     std::atomic<bool> Connected{true};
     const DeviceType Type{};
 
@@ -193,7 +231,7 @@ struct SIMDALIGN DeviceBase {
 
     DevFmtChannels FmtChans{};
     DevFmtType FmtType{};
-    uint mAmbiOrder{0};
+    uint mAmbiOrder{0u};
     float mXOverFreq{400.0f};
     /* If the main device mix is horizontal/2D only. */
     bool m2DMixing{false};
@@ -236,7 +274,7 @@ struct SIMDALIGN DeviceBase {
 
     /* Temp storage used for mixer processing. */
     static constexpr std::size_t MixerLineSize{BufferLineSize + DecoderBase::sMaxPadding};
-    static constexpr std::size_t MixerChannelsMax{16};
+    static constexpr std::size_t MixerChannelsMax{25};
     alignas(16) std::array<float,MixerLineSize*MixerChannelsMax> mSampleData{};
     alignas(16) std::array<float,MixerLineSize+MaxResamplerPadding> mResampleData{};
 
@@ -259,21 +297,10 @@ struct SIMDALIGN DeviceBase {
     RealMixParams RealOut;
 
     /* HRTF state and info */
-    std::unique_ptr<DirectHrtfState> mHrtfState;
     al::intrusive_ptr<HrtfStore> mHrtf;
-    uint mIrSize{0};
+    uint mIrSize{0u};
 
-    /* Ambisonic-to-UHJ encoder */
-    std::unique_ptr<UhjEncoderBase> mUhjEncoder;
-
-    /* Ambisonic decoder for speakers */
-    std::unique_ptr<BFormatDec> AmbiDecoder;
-
-    /* Stereo-to-binaural filter */
-    std::unique_ptr<Bs2b::bs2b> Bs2b;
-
-    using PostProc = void(DeviceBase::*)(const size_t SamplesToDo);
-    PostProc PostProcess{nullptr};
+    PostProcess mPostProcess;
 
     std::unique_ptr<Compressor> Limiter;
 
@@ -346,31 +373,22 @@ struct SIMDALIGN DeviceBase {
             + mClockBaseSec.load(std::memory_order_relaxed) + ns;
     }
 
-    void ProcessHrtf(const std::size_t SamplesToDo);
-    void ProcessAmbiDec(const std::size_t SamplesToDo);
-    void ProcessAmbiDecStablized(const std::size_t SamplesToDo);
-    void ProcessUhj(const std::size_t SamplesToDo);
-    void ProcessBs2b(const std::size_t SamplesToDo);
-
-    void postProcess(const std::size_t SamplesToDo)
-    { if(PostProcess) [[likely]] (this->*PostProcess)(SamplesToDo); }
+    static void Process(std::monostate&, const std::size_t) { }
+    void Process(AmbiDecPostProcess &proc, const std::size_t SamplesToDo) const;
+    void Process(HrtfPostProcess &proc, const std::size_t SamplesToDo);
+    void Process(UhjPostProcess &proc, const std::size_t SamplesToDo);
+    void Process(StablizerPostProcess &proc, const std::size_t SamplesToDo);
+    void Process(Bs2bPostProcess &proc, const std::size_t SamplesToDo);
 
     void renderSamples(const std::span<void*> outBuffers, const uint numSamples);
     void renderSamples(void *outBuffer, const uint numSamples, const std::size_t frameStep);
 
     /* Caller must lock the device state, and the mixer must not be running. */
-    void doDisconnect(std::string msg);
+    void doDisconnect(std::string&& msg);
 
     template<typename ...Args>
-    void handleDisconnect(fmt::format_string<Args...> fmt, Args&& ...args)
-    { doDisconnect(fmt::format(std::move(fmt), std::forward<Args>(args)...)); }
-
-    /**
-     * Returns the index for the given channel name (e.g. FrontCenter), or
-     * InvalidChannelIndex if it doesn't exist.
-     */
-    [[nodiscard]] auto channelIdxByName(Channel chan) const noexcept -> std::uint8_t
-    { return RealOut.ChannelIndex[chan]; }
+    void handleDisconnect(std::format_string<Args...> fmt, Args&& ...args)
+    { doDisconnect(std::format(std::move(fmt), std::forward<Args>(args)...)); }
 
 private:
     uint renderSamples(const uint numSamples);
@@ -387,9 +405,9 @@ public:
 /* Must be less than 15 characters (16 including terminating null) for
  * compatibility with pthread_setname_np limitations. */
 [[nodiscard]] constexpr
-auto GetMixerThreadName() noexcept -> const char* { return "alsoft-mixer"; }
+auto GetMixerThreadName() noexcept -> gsl::czstring { return "alsoft-mixer"; }
 
 [[nodiscard]] constexpr
-auto GetRecordThreadName() noexcept -> const char* { return "alsoft-record"; }
+auto GetRecordThreadName() noexcept -> gsl::czstring { return "alsoft-record"; }
 
 #endif /* CORE_DEVICE_H */

@@ -42,15 +42,30 @@
 #include "alnumeric.h"
 #include "core/except.h"
 #include "core/logging.h"
-#include "strutils.h"
+#include "direct_defs.h"
+#include "gsl/gsl"
+#include "strutils.hpp"
 
 
-void ALCcontext::setErrorImpl(ALenum errorCode, const fmt::string_view fmt, fmt::format_args args)
+namespace {
+
+auto alGetError(gsl::not_null<al::Context*> context) noexcept -> ALenum
 {
-    const auto msg = fmt::vformat(fmt, std::move(args));
+    auto ret = context->mLastThreadError.get();
+    if(ret != AL_NO_ERROR) [[unlikely]]
+        context->mLastThreadError.set(AL_NO_ERROR);
+    return ret;
+}
+
+} // namespace
+
+
+void al::Context::setErrorImpl(ALenum errorCode, const std::string_view fmt, std::format_args args)
+{
+    const auto message = std::vformat(fmt, std::move(args));
 
     WARN("Error generated on context {}, code {:#04x}, \"{}\"",
-        decltype(std::declval<void*>()){this}, as_unsigned(errorCode), msg);
+        decltype(std::declval<void*>()){this}, as_unsigned(errorCode), message);
     if(TrapALError)
     {
 #ifdef _WIN32
@@ -65,12 +80,12 @@ void ALCcontext::setErrorImpl(ALenum errorCode, const fmt::string_view fmt, fmt:
     if(mLastThreadError.get() == AL_NO_ERROR)
         mLastThreadError.set(errorCode);
 
-    debugMessage(DebugSource::API, DebugType::Error, static_cast<ALuint>(errorCode),
-        DebugSeverity::High, msg);
+    debugMessage(DebugSource::API, DebugType::Error, as_unsigned(errorCode), DebugSeverity::High,
+        message);
 }
 
-void ALCcontext::throw_error_impl(ALenum errorCode, const fmt::string_view fmt,
-    fmt::format_args args)
+void al::Context::throw_error_impl(ALenum errorCode, const std::string_view fmt,
+    std::format_args args)
 {
     setErrorImpl(errorCode, fmt, std::move(args));
     throw al::base_exception{};
@@ -83,9 +98,9 @@ void ALCcontext::throw_error_impl(ALenum errorCode, const fmt::string_view fmt,
 AL_API auto AL_APIENTRY alGetError() noexcept -> ALenum
 {
     if(auto context = GetContextRef()) [[likely]]
-        return alGetErrorDirect(context.get());
+        return alGetError(gsl::make_not_null(context.get()));
 
-    auto get_value = [](const char *envname, const char *optname) -> ALenum
+    static constexpr auto get_value = [](gsl::czstring envname, std::string_view optname) -> ALenum
     {
         auto optstr = al::getenv(envname);
         if(!optstr)
@@ -96,7 +111,7 @@ AL_API auto AL_APIENTRY alGetError() noexcept -> ALenum
                 auto idx = 0_uz;
                 auto value = std::stoi(*optstr, &idx, 0);
                 if(idx >= optstr->size() || std::isspace(optstr->at(idx)))
-                    return static_cast<ALenum>(value);
+                    return value;
             } catch(...) {
             }
             ERR("Invalid default error value: \"{}\"", *optstr);
@@ -120,8 +135,5 @@ AL_API auto AL_APIENTRY alGetError() noexcept -> ALenum
 
 FORCE_ALIGN auto AL_APIENTRY alGetErrorDirect(ALCcontext *context) noexcept -> ALenum
 {
-    auto ret = context->mLastThreadError.get();
-    if(ret != AL_NO_ERROR) [[unlikely]]
-        context->mLastThreadError.set(AL_NO_ERROR);
-    return ret;
+    return alGetError(al::verify_context(context));
 }

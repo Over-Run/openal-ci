@@ -60,10 +60,10 @@
 #include <algorithm>
 #include <array>
 #include <bit>
-#include <cassert>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <new>
@@ -76,7 +76,9 @@
 #include "alnumeric.h"
 #include "fmt/core.h"
 #include "fmt/ranges.h"
+#include "gsl/gsl"
 #include "opthelpers.h"
+#include "pragmadefs.h"
 
 
 using uint = unsigned int;
@@ -354,11 +356,11 @@ force_inline void vcplxmulconj(v4sf &ar, v4sf &ai, v4sf br, v4sf bi) noexcept
 inline void assertv4(const std::span<const float,4> v_f [[maybe_unused]],
     const float f0 [[maybe_unused]], const float f1 [[maybe_unused]],
     const float f2 [[maybe_unused]], const float f3 [[maybe_unused]])
-{ assert(v_f[0] == f0 && v_f[1] == f1 && v_f[2] == f2 && v_f[3] == f3); }
+{ Expects(v_f[0] == f0 && v_f[1] == f1 && v_f[2] == f2 && v_f[3] == f3); }
 
 template<typename T, T ...N>
 constexpr auto make_float_array(std::integer_sequence<T,N...>)
-{ return std::array{static_cast<float>(N)...}; }
+{ return std::array{gsl::narrow<float>(N)...}; }
 
 /* detect bugs with the vector support macros */
 [[maybe_unused]] auto validate_pffft_simd() -> bool
@@ -434,7 +436,7 @@ constexpr auto make_float_array(std::integer_sequence<T,N...>)
 /* SSE and co like 16-bytes aligned pointers */
 /* with a 64-byte alignment, we are even aligned on L2 cache lines... */
 constexpr auto V4sfAlignment = 64_uz;
-constexpr auto V4sfAlignVal = std::align_val_t(V4sfAlignment);
+constexpr auto V4sfAlignVal = gsl::narrow<std::align_val_t>(V4sfAlignment);
 
 /* NOLINTBEGIN(cppcoreguidelines-pro-bounds-pointer-arithmetic)
  * FIXME: Converting this from raw pointers to spans or something will probably
@@ -486,7 +488,7 @@ NOINLINE void passf2_ps(const size_t ido, const size_t l1, const v4sf *cc, v4sf 
 NOINLINE void passf3_ps(const size_t ido, const size_t l1, const v4sf *cc, v4sf *RESTRICT ch,
     const float *const wa1, const float fsign)
 {
-    assert(ido > 2);
+    Expects(ido > 2);
 
     const auto taur = ld_ps1(-0.5f);
     const auto taui = ld_ps1(0.866025403784439f*fsign);
@@ -615,7 +617,7 @@ NOINLINE void passf5_ps(const size_t ido, const size_t l1, const v4sf *cc, v4sf 
     auto ch_ref = [&ch,ido,l1](size_t a_1, size_t a_3) noexcept -> auto&
     { return ch[(a_3-1)*l1*ido + a_1 + 1]; };
 
-    assert(ido > 2);
+    Expects(ido > 2);
 
     const auto wa2 = wa1 + ido;
     const auto wa3 = wa2 + ido;
@@ -1228,7 +1230,7 @@ void radb5_ps(const size_t ido, const size_t l1, const v4sf *RESTRICT cc, v4sf *
 NOINLINE auto rfftf1_ps(const size_t n, const v4sf *input_readonly, v4sf *work1, v4sf *work2,
     const float *wa, const std::span<const uint,15> ifac) -> v4sf*
 {
-    assert(work1 != work2);
+    Expects(work1 != work2);
 
     const auto *in = input_readonly;
     auto *out = in == work2 ? work1 : work2;
@@ -1249,7 +1251,7 @@ NOINLINE auto rfftf1_ps(const size_t n, const v4sf *input_readonly, v4sf *work1,
         case 4: radf4_ps(ido, l1, in, out, &wa[iw]); break;
         case 3: radf3_ps(ido, l1, in, out, &wa[iw]); break;
         case 2: radf2_ps(ido, l1, in, out, &wa[iw]); break;
-        default: assert(0);
+        default: std::abort();
         }
         if(++k1 > nf)
             return out;
@@ -1271,7 +1273,7 @@ NOINLINE auto rfftf1_ps(const size_t n, const v4sf *input_readonly, v4sf *work1,
 NOINLINE v4sf *rfftb1_ps(const size_t n, const v4sf *input_readonly, v4sf *work1, v4sf *work2,
     const float *wa, const std::span<const uint,15> ifac)
 {
-    assert(work1 != work2);
+    Expects(work1 != work2);
 
     const auto *in = input_readonly;
     auto *out = in == work2 ? work1 : work2;
@@ -1290,7 +1292,7 @@ NOINLINE v4sf *rfftb1_ps(const size_t n, const v4sf *input_readonly, v4sf *work1
         case 4: radb4_ps(ido, l1, in, out, &wa[iw]); break;
         case 3: radb3_ps(ido, l1, in, out, &wa[iw]); break;
         case 2: radb2_ps(ido, l1, in, out, &wa[iw]); break;
-        default: assert(0);
+        default: std::abort();
         }
         if(++k1 > nf)
             return out;
@@ -1314,7 +1316,7 @@ NOINLINE v4sf *rfftb1_ps(const size_t n, const v4sf *input_readonly, v4sf *work1
 v4sf *cfftf1_ps(const size_t n, const v4sf *input_readonly, v4sf *work1, v4sf *work2,
     const float *wa, const std::span<const uint,15> ifac, const float fsign)
 {
-    assert(work1 != work2);
+    Expects(work1 != work2);
 
     const auto *in = input_readonly;
     auto *out = in == work2 ? work1 : work2;
@@ -1334,7 +1336,7 @@ v4sf *cfftf1_ps(const size_t n, const v4sf *input_readonly, v4sf *work1, v4sf *w
         case 4: passf4_ps(idot, l1, in, out, &wa[iw], fsign); break;
         case 3: passf3_ps(idot, l1, in, out, &wa[iw], fsign); break;
         case 2: passf2_ps(idot, l1, in, out, &wa[iw], fsign); break;
-        default: assert(0);
+        default: std::abort();
         }
         if(++k1 > nf+1)
             return out;
@@ -1406,13 +1408,13 @@ void rffti1_ps(const uint n, float *wa, const std::span<uint,15> ifac)
         {
             auto i = is;
             ld += l1;
-            const auto argld = static_cast<double>(ld)*argh;
+            const auto argld = gsl::narrow_cast<double>(ld)*argh;
             auto fi = 0.0;
             for(auto ii = 2_uz;ii < ido;ii += 2)
             {
                 fi += 1.0;
-                wa[i++] = static_cast<float>(std::cos(fi*argld));
-                wa[i++] = static_cast<float>(std::sin(fi*argld));
+                wa[i++] = gsl::narrow_cast<float>(std::cos(fi*argld));
+                wa[i++] = gsl::narrow_cast<float>(std::sin(fi*argld));
             }
             is += ido;
         }
@@ -1442,13 +1444,13 @@ void cffti1_ps(const uint n, float *wa, const std::span<uint,15> ifac)
             wa[i-1] = 1.0f;
             wa[i] = 0.0f;
             ld += l1;
-            const auto argld = static_cast<double>(ld)*argh;
+            const auto argld = gsl::narrow_cast<double>(ld)*argh;
             auto fi = 0.0;
             for(auto ii = 3_uz;ii < idot;ii += 2)
             {
                 fi += 1.0;
-                wa[++i] = static_cast<float>(std::cos(fi*argld));
-                wa[++i] = static_cast<float>(std::sin(fi*argld));
+                wa[++i] = gsl::narrow_cast<float>(std::cos(fi*argld));
+                wa[++i] = gsl::narrow_cast<float>(std::sin(fi*argld));
             }
             if(ip > 5)
             {
@@ -1470,29 +1472,32 @@ struct alignas(V4sfAlignment) PFFFT_Setup {
     pffft_transform_t transform{};
 
     float *twiddle{}; /* N/4 elements */
+    DIAGNOSTIC_PUSH
+    std_pragma("GCC diagnostic ignored \"-Wignored-attributes\"")
     std::span<v4sf> e; /* N/4*3 elements */
+    DIAGNOSTIC_POP
 };
 
 auto pffft_new_setup(const unsigned int N, const pffft_transform_t transform) -> PFFFTSetupPtr
 {
-    assert(transform == PFFFT_REAL || transform == PFFFT_COMPLEX);
+    Expects(transform == PFFFT_REAL || transform == PFFFT_COMPLEX);
     /* unfortunately, the fft size must be a multiple of 16 for complex FFTs
      * and 32 for real FFTs -- a lot of stuff would need to be rewritten to
      * handle other cases (or maybe just switch to a scalar fft, I don't know..)
      */
     if(transform == PFFFT_REAL)
     {
-        assert(N >= 2u*SimdSize*SimdSize);
-        assert((N%(2u*SimdSize*SimdSize)) == 0);
+        Expects(N >= 2u*SimdSize*SimdSize);
+        Expects((N%(2u*SimdSize*SimdSize)) == 0);
     }
     else
     {
-        assert(N >= SimdSize*SimdSize);
-        assert((N%(SimdSize*SimdSize)) == 0);
+        Expects(N >= SimdSize*SimdSize);
+        Expects((N%(SimdSize*SimdSize)) == 0);
     }
 
     const auto Ncvec = uint{(transform == PFFFT_REAL ? N/2 : N) / SimdSize};
-    assert(Ncvec > 0u);
+    Expects(Ncvec > 0u);
 
     const auto storelen = sizeof(PFFFT_Setup) + 2_zu*Ncvec*sizeof(v4sf);
     auto storage = static_cast<gsl::owner<std::byte*>>(::operator new(storelen, V4sfAlignVal));
@@ -1519,9 +1524,9 @@ auto pffft_new_setup(const unsigned int N, const pffft_transform_t transform) ->
             const auto j = k % SimdSize;
             for(auto m = 0_uz;m < SimdSize-1;++m)
             {
-                const auto A = -2.0*std::numbers::pi*static_cast<double>((m+1)*k) / N;
-                e[((i*3 + m)*2 + 0)*SimdSize + j] = static_cast<float>(std::cos(A));
-                e[((i*3 + m)*2 + 1)*SimdSize + j] = static_cast<float>(std::sin(A));
+                const auto A = -2.0*std::numbers::pi*gsl::narrow_cast<double>((m+1)*k) / N;
+                e[((i*3 + m)*2 + 0)*SimdSize + j] = gsl::narrow_cast<float>(std::cos(A));
+                e[((i*3 + m)*2 + 1)*SimdSize + j] = gsl::narrow_cast<float>(std::sin(A));
             }
         }
         auto eiter = e.begin();
@@ -1608,7 +1613,7 @@ void unreversed_copy(const size_t N, const v4sf *in, v4sf *RESTRICT out, const i
 
 void pffft_cplx_finalize(const size_t Ncvec, const v4sf *in, v4sf *RESTRICT out, const v4sf *e)
 {
-    assert(in != out);
+    Expects(in != out);
 
     const auto dk = size_t{Ncvec/SimdSize}; // number of 4x4 matrix blocks
     for(auto k = 0_uz;k < dk;++k)
@@ -1671,7 +1676,7 @@ void pffft_cplx_finalize(const size_t Ncvec, const v4sf *in, v4sf *RESTRICT out,
 
 void pffft_cplx_preprocess(const size_t Ncvec, const v4sf *in, v4sf *RESTRICT out, const v4sf *e)
 {
-    assert(in != out);
+    Expects(in != out);
 
     const auto dk = size_t{Ncvec/SimdSize}; // number of 4x4 matrix blocks
     for(size_t k{0};k < dk;++k)
@@ -1791,7 +1796,7 @@ NOINLINE void pffft_real_finalize(const size_t Ncvec, const v4sf *in, v4sf *REST
 {
     static constexpr auto s = std::numbers::sqrt2_v<float>/2.0f;
 
-    assert(in != out);
+    Expects(in != out);
     const auto dk = size_t{Ncvec/SimdSize}; // number of 4x4 matrix blocks
     /* fftpack order is f0r f1r f1i f2r f2i ... f(n-1)r f(n-1)i f(n)r */
 
@@ -1814,10 +1819,10 @@ NOINLINE void pffft_real_finalize(const size_t Ncvec, const v4sf *in, v4sf *REST
 
     out[0] = vinsert0(out[0], (cr[0]+cr[2]) +   (cr[1]+cr[3]));
     out[1] = vinsert0(out[1], (cr[0]+cr[2]) -   (cr[1]+cr[3]));
-    out[2] = vinsert0(out[2], (cr[0]-cr[2]));
-    out[3] = vinsert0(out[3], (cr[3]-cr[1]));
-    out[4] = vinsert0(out[4],  ci[0]        + s*(ci[1]-ci[3]));
-    out[5] = vinsert0(out[5],       -ci[2]  - s*(ci[1]+ci[3]));
+    out[4] = vinsert0(out[4], (cr[0]-cr[2]));
+    out[5] = vinsert0(out[5], (cr[3]-cr[1]));
+    out[2] = vinsert0(out[2],  ci[0]        + s*(ci[1]-ci[3]));
+    out[3] = vinsert0(out[3],       -ci[2]  - s*(ci[1]+ci[3]));
     out[6] = vinsert0(out[6],  ci[0]        - s*(ci[1]-ci[3]));
     out[7] = vinsert0(out[7],        ci[2]  - s*(ci[1]+ci[3]));
 
@@ -1892,7 +1897,7 @@ NOINLINE void pffft_real_preprocess(const size_t Ncvec, const v4sf *in, v4sf *RE
 {
     static constexpr auto sqrt2 = std::numbers::sqrt2_v<float>;
 
-    assert(in != out);
+    Expects(in != out);
     const auto dk = size_t{Ncvec/SimdSize}; // number of 4x4 matrix blocks
     /* fftpack order is f0r f1r f1i f2r f2i ... f(n-1)r f(n-1)i f(n)r */
 
@@ -1986,8 +1991,8 @@ void pffft_zreorder_internal(const PFFFT_Setup *setup, const v4sf *vin, v4sf *RE
 void pffft_transform_internal(const PFFFT_Setup *setup, const v4sf *vinput, v4sf *voutput,
     v4sf *scratch, const pffft_direction_t direction, const bool ordered)
 {
-    assert(scratch != nullptr);
-    assert(voutput != scratch);
+    Expects(scratch != nullptr);
+    Expects(voutput != scratch);
 
     const auto Ncvec = size_t{setup->Ncvec};
     const auto nf_odd = (setup->ifac[1]&1) != 0;
@@ -2047,7 +2052,7 @@ void pffft_transform_internal(const PFFFT_Setup *setup, const v4sf *vinput, v4sf
     if(buff[ib] != voutput)
     {
         /* extra copy required -- this situation should only happen when finput == foutput */
-        assert(vinput==voutput);
+        Expects(vinput == voutput);
         for(auto k = 0_uz;k < Ncvec;++k)
         {
             const auto a = buff[ib][2*k];
@@ -2076,9 +2081,6 @@ void pffft_zconvolve_scale_accumulate_internal(const PFFFT_Setup *s, const v4sf 
     __builtin_prefetch(va+6);
     __builtin_prefetch(vb+6);
     __builtin_prefetch(vab+6);
-#ifndef __clang__
-#define ZCONVOLVE_USING_INLINE_NEON_ASM
-#endif
 #endif
 
     const auto ar1 = vextract0(va[0]);
@@ -2088,54 +2090,6 @@ void pffft_zconvolve_scale_accumulate_internal(const PFFFT_Setup *s, const v4sf 
     const auto abr1 = vextract0(vab[0]);
     const auto abi1 = vextract0(vab[1]);
 
-#ifdef ZCONVOLVE_USING_INLINE_ASM
-    /* Inline asm version, unfortunately miscompiled by clang 3.2, at least on
-     * Ubuntu. So this will be restricted to GCC.
-     *
-     * Does it still miscompile with Clang? Is it even needed with today's
-     * optimizers?
-     */
-    const auto *a_ = a;
-    const auto *b_ = b;
-    auto *ab_ = ab;
-    auto N = size_t{Ncvec};
-    asm volatile("mov         r8, %2                  \n"
-                "vdup.f32    q15, %4                 \n"
-                "1:                                  \n"
-                "pld         [%0,#64]                \n"
-                "pld         [%1,#64]                \n"
-                "pld         [%2,#64]                \n"
-                "pld         [%0,#96]                \n"
-                "pld         [%1,#96]                \n"
-                "pld         [%2,#96]                \n"
-                "vld1.f32    {q0,q1},   [%0,:128]!         \n"
-                "vld1.f32    {q4,q5},   [%1,:128]!         \n"
-                "vld1.f32    {q2,q3},   [%0,:128]!         \n"
-                "vld1.f32    {q6,q7},   [%1,:128]!         \n"
-                "vld1.f32    {q8,q9},   [r8,:128]!          \n"
-
-                "vmul.f32    q10, q0, q4             \n"
-                "vmul.f32    q11, q0, q5             \n"
-                "vmul.f32    q12, q2, q6             \n"
-                "vmul.f32    q13, q2, q7             \n"
-                "vmls.f32    q10, q1, q5             \n"
-                "vmla.f32    q11, q1, q4             \n"
-                "vld1.f32    {q0,q1}, [r8,:128]!     \n"
-                "vmls.f32    q12, q3, q7             \n"
-                "vmla.f32    q13, q3, q6             \n"
-                "vmla.f32    q8, q10, q15            \n"
-                "vmla.f32    q9, q11, q15            \n"
-                "vmla.f32    q0, q12, q15            \n"
-                "vmla.f32    q1, q13, q15            \n"
-                "vst1.f32    {q8,q9},[%2,:128]!    \n"
-                "vst1.f32    {q0,q1},[%2,:128]!    \n"
-                "subs        %3, #2                  \n"
-                "bne         1b                      \n"
-                : "+r"(a_), "+r"(b_), "+r"(ab_), "+r"(N) : "r"(scaling) : "r8", "q0","q1","q2","q3","q4","q5","q6","q7","q8","q9", "q10","q11","q12","q13","q15","memory");
-
-#else
-
-    /* Default routine, works fine for non-arm cpus with current compilers. */
     const auto vscale = ld_ps1(scaling);
     for(auto i = 0_uz;i < Ncvec;i += 2)
     {
@@ -2155,7 +2109,6 @@ void pffft_zconvolve_scale_accumulate_internal(const PFFFT_Setup *s, const v4sf 
         vab[2*i + 2] = vmadd(ar4, vscale, vab[2*i + 2]);
         vab[2*i + 3] = vmadd(ai4, vscale, vab[2*i + 3]);
     }
-#endif
 
     if(s->transform == PFFFT_REAL)
     {
@@ -2191,25 +2144,23 @@ void pffft_zconvolve_accumulate_internal(const PFFFT_Setup *s, const v4sf *RESTR
     const auto abr1 = vextract0(vab[0]);
     const auto abi1 = vextract0(vab[1]);
 
-    /* No inline assembly for this version. I'm not familiar enough with NEON
-     * assembly, and I don't know that it's needed with today's optimizers.
-     */
     for(auto i = 0_uz;i < Ncvec;i += 2)
     {
-        auto ar4 = va[2*i+0];
-        auto ai4 = va[2*i+1];
-        auto br4 = vb[2*i+0];
-        auto bi4 = vb[2*i+1];
+        auto ar4 = va[2*i + 0];
+        auto ai4 = va[2*i + 1];
+        auto br4 = vb[2*i + 0];
+        auto bi4 = vb[2*i + 1];
         vcplxmul(ar4, ai4, br4, bi4);
-        vab[2*i+0] = vadd(ar4, vab[2*i+0]);
-        vab[2*i+1] = vadd(ai4, vab[2*i+1]);
-        ar4 = va[2*i+2];
-        ai4 = va[2*i+3];
-        br4 = vb[2*i+2];
-        bi4 = vb[2*i+3];
+        vab[2*i + 0] = vadd(ar4, vab[2*i + 0]);
+        vab[2*i + 1] = vadd(ai4, vab[2*i + 1]);
+
+        ar4 = va[2*i + 2];
+        ai4 = va[2*i + 3];
+        br4 = vb[2*i + 2];
+        bi4 = vb[2*i + 3];
         vcplxmul(ar4, ai4, br4, bi4);
-        vab[2*i+2] = vadd(ar4, vab[2*i+2]);
-        vab[2*i+3] = vadd(ai4, vab[2*i+3]);
+        vab[2*i + 2] = vadd(ar4, vab[2*i + 2]);
+        vab[2*i + 3] = vadd(ai4, vab[2*i + 3]);
     }
 
     if(s->transform == PFFFT_REAL)
@@ -2228,8 +2179,8 @@ void pffft_zconvolve_accumulate_internal(const PFFFT_Setup *s, const v4sf *RESTR
 void pffft_zreorder(const PFFFT_Setup *setup, const float *in, float *out,
     pffft_direction_t direction)
 {
-    assert(in != out);
-    assert(valigned(in) && valigned(out));
+    Expects(in != out);
+    Expects(valigned(in) && valigned(out));
     pffft_zreorder_internal(setup, reinterpret_cast<const v4sf*>(in), reinterpret_cast<v4sf*>(out),
         direction);
 }
@@ -2237,14 +2188,14 @@ void pffft_zreorder(const PFFFT_Setup *setup, const float *in, float *out,
 void pffft_zconvolve_scale_accumulate(const PFFFT_Setup *s, const float *a, const float *b,
     float *ab, float scaling)
 {
-    assert(valigned(a) && valigned(b) && valigned(ab));
+    Expects(valigned(a) && valigned(b) && valigned(ab));
     pffft_zconvolve_scale_accumulate_internal(s, reinterpret_cast<const v4sf*>(a),
         reinterpret_cast<const v4sf*>(b), reinterpret_cast<v4sf*>(ab), scaling);
 }
 
 void pffft_zconvolve_accumulate(const PFFFT_Setup *s, const float *a, const float *b, float *ab)
 {
-    assert(valigned(a) && valigned(b) && valigned(ab));
+    Expects(valigned(a) && valigned(b) && valigned(ab));
     pffft_zconvolve_accumulate_internal(s, reinterpret_cast<const v4sf*>(a),
         reinterpret_cast<const v4sf*>(b), reinterpret_cast<v4sf*>(ab));
 }
@@ -2252,7 +2203,7 @@ void pffft_zconvolve_accumulate(const PFFFT_Setup *s, const float *a, const floa
 void pffft_transform(const PFFFT_Setup *setup, const float *input, float *output, float *work,
     pffft_direction_t direction)
 {
-    assert(valigned(input) && valigned(output) && valigned(work));
+    Expects(valigned(input) && valigned(output) && valigned(work));
     pffft_transform_internal(setup, reinterpret_cast<const v4sf*>(std::assume_aligned<16>(input)),
         reinterpret_cast<v4sf*>(std::assume_aligned<16>(output)),
         reinterpret_cast<v4sf*>(std::assume_aligned<16>(work)), direction, false);
@@ -2261,7 +2212,7 @@ void pffft_transform(const PFFFT_Setup *setup, const float *input, float *output
 void pffft_transform_ordered(const PFFFT_Setup *setup, const float *input, float *output,
     float *work, pffft_direction_t direction)
 {
-    assert(valigned(input) && valigned(output) && valigned(work));
+    Expects(valigned(input) && valigned(output) && valigned(work));
     pffft_transform_internal(setup, reinterpret_cast<const v4sf*>(std::assume_aligned<16>(input)),
         reinterpret_cast<v4sf*>(std::assume_aligned<16>(output)),
         reinterpret_cast<v4sf*>(std::assume_aligned<16>(work)), direction, true);
@@ -2280,7 +2231,7 @@ void pffft_transform_internal(const PFFFT_Setup *setup, const float *input, floa
     const auto Ncvec = size_t{setup->Ncvec};
     const auto nf_odd = (setup->ifac[1]&1) != 0;
 
-    assert(scratch != nullptr);
+    Expects(scratch != nullptr);
 
     /* z-domain data for complex transforms is already ordered without SIMD. */
     if(setup->transform == PFFFT_COMPLEX)
@@ -2319,7 +2270,7 @@ void pffft_transform_internal(const PFFFT_Setup *setup, const float *input, floa
     if(buff[ib] != output)
     {
         // extra copy required -- this situation should happens only when finput == foutput
-        assert(input == output);
+        Expects(input == output);
         std::ranges::copy(std::span{buff[ib], Ncvec*2_uz}, output);
     }
 }

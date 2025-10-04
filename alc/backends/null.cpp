@@ -45,9 +45,9 @@ using namespace std::string_view_literals;
 
 
 struct NullBackend final : public BackendBase {
-    explicit NullBackend(DeviceBase *device) noexcept : BackendBase{device} { }
+    explicit NullBackend(gsl::not_null<DeviceBase*> device) noexcept : BackendBase{device} { }
 
-    int mixerProc();
+    void mixerProc() const;
 
     void open(std::string_view name) override;
     bool reset() override;
@@ -58,7 +58,7 @@ struct NullBackend final : public BackendBase {
     std::thread mThread;
 };
 
-int NullBackend::mixerProc()
+void NullBackend::mixerProc() const
 {
     const milliseconds restTime{mDevice->mUpdateSize*1000/mDevice->mSampleRate / 2};
 
@@ -93,13 +93,11 @@ int NullBackend::mixerProc()
          */
         if(done >= mDevice->mSampleRate)
         {
-            seconds s{done/mDevice->mSampleRate};
+            const auto s = seconds{done/mDevice->mSampleRate};
             start += s;
             done -= mDevice->mSampleRate*s.count();
         }
     }
-
-    return 0;
 }
 
 
@@ -161,7 +159,8 @@ auto NullBackendFactory::enumerate(BackendType type) -> std::vector<std::string>
     return {};
 }
 
-BackendPtr NullBackendFactory::createBackend(DeviceBase *device, BackendType type)
+auto NullBackendFactory::createBackend(gsl::not_null<DeviceBase*> device, BackendType type)
+    -> BackendPtr
 {
     if(type == BackendType::Playback)
         return BackendPtr{new NullBackend{device}};

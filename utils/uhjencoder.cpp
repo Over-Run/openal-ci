@@ -26,10 +26,9 @@
 
 #include <algorithm>
 #include <array>
-#include <cassert>
 #include <cmath>
 #include <cstddef>
-#include <cstdio>
+#include <iostream>
 #include <memory>
 #include <numbers>
 #include <ranges>
@@ -39,8 +38,12 @@
 #include <vector>
 
 #include "alnumeric.h"
-#include "fmt/core.h"
+#include "alstring.h"
+#include "filesystem.h"
+#include "fmt/base.h"
+#include "fmt/ostream.h"
 #include "fmt/ranges.h"
+#include "fmt/std.h"
 #include "phase_shifter.h"
 #include "vector.h"
 
@@ -48,27 +51,29 @@
 
 #include "win_main_utf8.h"
 
+#if HAVE_CXXMODULES
+import gsl;
+#else
+#include "gsl/gsl"
+#endif
 
 namespace {
 
 using namespace std::string_view_literals;
 
-struct SndFileDeleter {
-    void operator()(SNDFILE *sndfile) { sf_close(sndfile); }
-};
-using SndFilePtr = std::unique_ptr<SNDFILE,SndFileDeleter>;
+using SndFilePtr = std::unique_ptr<SNDFILE, decltype([](SNDFILE *sndfile) { sf_close(sndfile); })>;
 
 
 using uint = unsigned int;
 
-constexpr uint BufferLineSize{1024};
+constexpr auto BufferLineSize = 1024u;
 
 using FloatBufferLine = std::array<float,BufferLineSize>;
 using FloatBufferSpan = std::span<float,BufferLineSize>;
 
 
 struct UhjEncoder {
-    constexpr static size_t sFilterDelay{1024};
+    constexpr static auto sFilterDelay = 1024_uz;
 
     /* Delays and processing storage for the unfiltered signal. */
     alignas(16) std::array<float,BufferLineSize+sFilterDelay> mW{};
@@ -245,9 +250,9 @@ constexpr auto GenCoeffs(double x /*+front*/, double y /*+left*/, double z /*+up
 {
     /* Coefficients are +3dB of FuMa. */
     return std::array{1.0f,
-        static_cast<float>(std::numbers::sqrt2 * x),
-        static_cast<float>(std::numbers::sqrt2 * y),
-        static_cast<float>(std::numbers::sqrt2 * z)};
+        gsl::narrow_cast<float>(std::numbers::sqrt2 * x),
+        gsl::narrow_cast<float>(std::numbers::sqrt2 * y),
+        gsl::narrow_cast<float>(std::numbers::sqrt2 * z)};
 }
 
 
@@ -274,7 +279,7 @@ auto main(std::span<std::string_view> args) -> int
     }
     args = args.subspan(1);
 
-    uint uhjchans = 2u;
+    auto uhjchans = 2u;
     auto num_files = 0_uz;
     auto num_encoded = 0_uz;
     std::ranges::for_each(args, [&uhjchans,&num_files,&num_encoded](std::string_view arg) -> void
@@ -296,40 +301,34 @@ auto main(std::span<std::string_view> args) -> int
         }
         ++num_files;
 
-        auto outname = std::string{arg};
-        const auto lastslash = outname.rfind('/');
-        if(lastslash != std::string::npos)
-            outname.erase(0, lastslash+1);
-        const auto extpos = outname.rfind('.');
-        if(extpos != std::string::npos)
-            outname.resize(extpos);
-        outname += ".uhj.flac";
+        auto outname = fs::path(al::char_as_u8(arg)).stem().replace_extension(u8".uhj.flac");
 
         auto ininfo = SF_INFO{};
         auto infile = SndFilePtr{sf_open(std::string{arg}.c_str(), SFM_READ, &ininfo)};
         if(!infile)
         {
-            fmt::println(stderr, "Failed to open {}", arg);
+            fmt::println(std::cerr, "Failed to open {}", arg);
             return;
         }
         fmt::println("Converting {} to {}...", arg, outname);
+        const auto inchannels = gsl::narrow<uint>(ininfo.channels);
 
         /* Work out the channel map, preferably using the actual channel map
          * from the file/format, but falling back to assuming WFX order.
          */
         auto spkrs = std::span<const SpeakerPos>{};
-        auto chanmap = std::vector<int>(static_cast<uint>(ininfo.channels), SF_CHANNEL_MAP_INVALID);
+        auto chanmap = std::vector<int>(inchannels, SF_CHANNEL_MAP_INVALID);
         if(sf_command(infile.get(), SFC_GET_CHANNEL_MAP_INFO, chanmap.data(),
-            ininfo.channels*int{sizeof(int)}) == SF_TRUE)
+            gsl::narrow<int>(std::span{chanmap}.size_bytes())) == SF_TRUE)
         {
             static constexpr auto monomap = std::array{SF_CHANNEL_MAP_CENTER};
-            static constexpr auto stereomap = std::array{SF_CHANNEL_MAP_LEFT, SF_CHANNEL_MAP_RIGHT};
+            static constexpr auto stereomap = std::array{SF_CHANNEL_MAP_LEFT,SF_CHANNEL_MAP_RIGHT};
             static constexpr auto quadmap = std::array{SF_CHANNEL_MAP_LEFT, SF_CHANNEL_MAP_RIGHT,
                 SF_CHANNEL_MAP_REAR_LEFT, SF_CHANNEL_MAP_REAR_RIGHT};
             static constexpr auto x51map = std::array{SF_CHANNEL_MAP_LEFT, SF_CHANNEL_MAP_RIGHT,
                 SF_CHANNEL_MAP_CENTER, SF_CHANNEL_MAP_LFE,
                 SF_CHANNEL_MAP_SIDE_LEFT, SF_CHANNEL_MAP_SIDE_RIGHT};
-            static constexpr auto x51rearmap = std::array{SF_CHANNEL_MAP_LEFT, SF_CHANNEL_MAP_RIGHT,
+            static constexpr auto x51rearmap = std::array{SF_CHANNEL_MAP_LEFT,SF_CHANNEL_MAP_RIGHT,
                 SF_CHANNEL_MAP_CENTER, SF_CHANNEL_MAP_LFE,
                 SF_CHANNEL_MAP_REAR_LEFT, SF_CHANNEL_MAP_REAR_RIGHT};
             static constexpr auto x71map = std::array{SF_CHANNEL_MAP_LEFT, SF_CHANNEL_MAP_RIGHT,
@@ -349,7 +348,7 @@ auto main(std::span<std::string_view> args) -> int
                 SF_CHANNEL_MAP_AMBISONIC_B_Z};
 
             static constexpr auto match_chanmap = [](const std::span<const int> a,
-                const std::span<const decltype(monomap)::value_type> b) -> bool
+                const std::span<const decltype(SF_CHANNEL_MAP_INVALID)> b) -> bool
             {
                 if(a.size() != b.size())
                     return false;
@@ -376,7 +375,7 @@ auto main(std::span<std::string_view> args) -> int
             }
             else
             {
-                fmt::println(stderr, " ... {} channels not supported (map: {})", chanmap.size(),
+                fmt::println(std::cerr, " ... {} channels not supported (map: {})", chanmap.size(),
                     fmt::join(chanmap, ", "));
                 return;
             }
@@ -384,43 +383,45 @@ auto main(std::span<std::string_view> args) -> int
         else if(sf_command(infile.get(), SFC_WAVEX_GET_AMBISONIC, nullptr,
             0) == SF_AMBISONIC_B_FORMAT)
         {
-            if(ininfo.channels == 4)
+            switch(inchannels)
             {
-                fmt::println(stderr, " ... detected FuMa 3D B-Format");
+            case 4:
+                fmt::println(std::cerr, " ... detected FuMa 3D B-Format");
                 chanmap[0] = SF_CHANNEL_MAP_AMBISONIC_B_W;
                 chanmap[1] = SF_CHANNEL_MAP_AMBISONIC_B_X;
                 chanmap[2] = SF_CHANNEL_MAP_AMBISONIC_B_Y;
                 chanmap[3] = SF_CHANNEL_MAP_AMBISONIC_B_Z;
-            }
-            else if(ininfo.channels == 3)
-            {
-                fmt::println(stderr, " ... detected FuMa 2D B-Format");
+                break;
+
+            case 3:
+                fmt::println(std::cerr, " ... detected FuMa 2D B-Format");
                 chanmap[0] = SF_CHANNEL_MAP_AMBISONIC_B_W;
                 chanmap[1] = SF_CHANNEL_MAP_AMBISONIC_B_X;
                 chanmap[2] = SF_CHANNEL_MAP_AMBISONIC_B_Y;
-            }
-            else
-            {
-                fmt::println(stderr, " ... unhandled {}-channel B-Format", ininfo.channels);
+                break;
+
+            default:
+                fmt::println(std::cerr, " ... unhandled {}-channel B-Format", inchannels);
                 return;
             }
         }
-        else if(ininfo.channels == 1)
+        else switch(inchannels)
         {
-            fmt::println(stderr, " ... assuming front-center");
+        case 1:
+            fmt::println(std::cerr, " ... assuming front-center");
             spkrs = MonoMap;
             chanmap[0] = SF_CHANNEL_MAP_CENTER;
-        }
-        else if(ininfo.channels == 2)
-        {
-            fmt::println(stderr, " ... assuming WFX order stereo");
+            break;
+
+        case 2:
+            fmt::println(std::cerr, " ... assuming WFX order stereo");
             spkrs = StereoMap;
             chanmap[0] = SF_CHANNEL_MAP_LEFT;
             chanmap[1] = SF_CHANNEL_MAP_RIGHT;
-        }
-        else if(ininfo.channels == 6)
-        {
-            fmt::println(stderr, " ... assuming WFX order 5.1");
+            break;
+
+        case 6:
+            fmt::println(std::cerr, " ... assuming WFX order 5.1");
             spkrs = X51Map;
             chanmap[0] = SF_CHANNEL_MAP_LEFT;
             chanmap[1] = SF_CHANNEL_MAP_RIGHT;
@@ -428,10 +429,10 @@ auto main(std::span<std::string_view> args) -> int
             chanmap[3] = SF_CHANNEL_MAP_LFE;
             chanmap[4] = SF_CHANNEL_MAP_SIDE_LEFT;
             chanmap[5] = SF_CHANNEL_MAP_SIDE_RIGHT;
-        }
-        else if(ininfo.channels == 8)
-        {
-            fmt::println(stderr, " ... assuming WFX order 7.1");
+            break;
+
+        case 8:
+            fmt::println(std::cerr, " ... assuming WFX order 7.1");
             spkrs = X71Map;
             chanmap[0] = SF_CHANNEL_MAP_LEFT;
             chanmap[1] = SF_CHANNEL_MAP_RIGHT;
@@ -441,22 +442,24 @@ auto main(std::span<std::string_view> args) -> int
             chanmap[5] = SF_CHANNEL_MAP_REAR_RIGHT;
             chanmap[6] = SF_CHANNEL_MAP_SIDE_LEFT;
             chanmap[7] = SF_CHANNEL_MAP_SIDE_RIGHT;
-        }
-        else
-        {
-            fmt::println(stderr, " ... unmapped {}-channel audio not supported", ininfo.channels);
+            break;
+
+        default:
+            fmt::println(std::cerr, " ... unmapped {}-channel audio not supported", inchannels);
             return;
         }
 
         auto outinfo = SF_INFO{};
         outinfo.frames = ininfo.frames;
         outinfo.samplerate = ininfo.samplerate;
-        outinfo.channels = static_cast<int>(uhjchans);
+        outinfo.channels = gsl::narrow<int>(uhjchans);
         outinfo.format = SF_FORMAT_PCM_24 | SF_FORMAT_FLAC;
-        auto outfile = SndFilePtr{sf_open(outname.c_str(), SFM_WRITE, &outinfo)};
+        auto outfile = SndFilePtr{sf_open(
+            /* NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) */
+            reinterpret_cast<const char*>(outname.u8string().c_str()), SFM_WRITE, &outinfo)};
         if(!outfile)
         {
-            fmt::println(stderr, " ... failed to create {}", outname);
+            fmt::println(std::cerr, " ... failed to create {}", outname);
             return;
         }
 
@@ -465,11 +468,9 @@ auto main(std::span<std::string_view> args) -> int
         auto ambmem = std::span{splbuf}.subspan<0,4>();
         auto encmem = std::span{splbuf}.subspan<4,4>();
         auto srcmem = std::span{splbuf[8]};
-        auto membuf = al::vector<float,16>((static_cast<uint>(ininfo.channels)+size_t{uhjchans})
-            * BufferLineSize);
+        auto membuf = al::vector<float,16>((size_t{inchannels}+uhjchans) * BufferLineSize);
         auto outmem = std::span{membuf}.first(size_t{BufferLineSize}*uhjchans);
-        auto inmem = std::span{membuf}.last(size_t{BufferLineSize}
-            * static_cast<uint>(ininfo.channels));
+        auto inmem = std::span{membuf}.last(size_t{BufferLineSize} * inchannels);
 
         /* A number of initial samples need to be skipped to cut the lead-in
          * from the all-pass filter delay. The same number of samples need to
@@ -477,37 +478,37 @@ auto main(std::span<std::string_view> args) -> int
          * to ensure none of the original input is lost.
          */
         auto total_wrote = 0_uz;
+        auto clipped_samples = 0_uz;
         auto LeadIn = size_t{UhjEncoder::sFilterDelay};
-        auto LeadOut = sf_count_t{UhjEncoder::sFilterDelay};
+        auto LeadOut = size_t{UhjEncoder::sFilterDelay};
         while(LeadIn > 0 || LeadOut > 0)
         {
-            auto sgot = sf_readf_float(infile.get(), inmem.data(), BufferLineSize);
-            if(sgot < BufferLineSize)
+            auto got = al::saturate_cast<size_t>(sf_readf_float(infile.get(), inmem.data(),
+                BufferLineSize));
+            if(got < BufferLineSize)
             {
-                sgot = std::max(sgot, sf_count_t{0});
-                const auto remaining = std::min(BufferLineSize - sgot, LeadOut);
-                std::ranges::fill(inmem | std::views::drop(sgot*ininfo.channels), 0.0f);
-                sgot += remaining;
+                const auto remaining = std::min(BufferLineSize - got, LeadOut);
+                std::ranges::fill(inmem | std::views::drop(got*inchannels), 0.0f);
+                got += remaining;
                 LeadOut -= remaining;
             }
 
             std::ranges::fill(ambmem | std::views::join, 0.0f);
 
-            auto got = static_cast<size_t>(sgot);
             if(spkrs.empty())
             {
                 /* B-Format is already in the correct order. It just needs a
                  * +3dB boost.
                  */
                 static constexpr auto scale = std::numbers::sqrt2_v<float>;
-                const auto chans = std::min<size_t>(static_cast<uint>(ininfo.channels), 4u);
-                for(auto c = 0_uz;c < chans;++c)
+                const auto chans = size_t{std::min(inchannels, 4u)};
+                for(const auto c : std::views::iota(0_uz, chans))
                 {
-                    for(auto i = 0_uz;i < got;++i)
-                        ambmem[c][i] = inmem[i*static_cast<uint>(ininfo.channels) + c] * scale;
+                    for(const auto i : std::views::iota(0_uz, got))
+                        ambmem[c][i] = inmem[i*inchannels + c]*scale;
                 }
             }
-            else for(auto idx = 0_uz;idx < chanmap.size();++idx)
+            else for(const auto idx : std::views::iota(0_uz, chanmap.size()))
             {
                 const auto chanid = chanmap[idx];
                 /* Skip LFE. Or mix directly into W? Or W+X? */
@@ -517,12 +518,12 @@ auto main(std::span<std::string_view> args) -> int
                 const auto spkr = std::ranges::find(spkrs, chanid, &SpeakerPos::mChannelID);
                 if(spkr == spkrs.end())
                 {
-                    fmt::println(stderr, " ... failed to find channel ID {}", chanid);
+                    fmt::println(std::cerr, " ... failed to find channel ID {}", chanid);
                     continue;
                 }
 
-                for(auto i = 0_uz;i < got;++i)
-                    srcmem[i] = inmem[i*static_cast<uint>(ininfo.channels) + idx];
+                for(const auto i : std::views::iota(0_uz, got))
+                    srcmem[i] = inmem[i*inchannels + idx];
 
                 static constexpr auto Deg2Rad = std::numbers::pi / 180.0;
                 const auto coeffs = GenCoeffs(
@@ -532,7 +533,7 @@ auto main(std::span<std::string_view> args) -> int
                 std::ignore = std::ranges::mismatch(ambmem, coeffs,
                     [srcmem,got](const FloatBufferSpan output, const float gain)
                 {
-                    std::ranges::transform(srcmem | std::views::take(got), output, output.begin(),
+                    std::ranges::transform(srcmem.first(got), output, output.begin(),
                         [gain](const float s, const float o) noexcept { return s*gain + o; });
                     return true;
                 });
@@ -546,29 +547,35 @@ auto main(std::span<std::string_view> args) -> int
             }
 
             got -= LeadIn;
-            for(auto c = 0_uz;c < uhjchans;++c)
+            for(const auto c : std::views::iota(0_uz, uhjchans))
             {
                 static constexpr auto max_val = 8388607.0f / 8388608.0f;
-                for(auto i = 0_uz;i < got;++i)
-                    outmem[i*uhjchans + c] = std::clamp(encmem[c][LeadIn+i], -1.0f, max_val);
+                for(const auto i : std::views::iota(0_uz, got))
+                {
+                    const auto sample = std::clamp(encmem[c][LeadIn+i], -1.0f, max_val);
+                    clipped_samples += sample != encmem[c][LeadIn+i];
+                    outmem[i*uhjchans + c] = sample;
+                }
             }
             LeadIn = 0;
 
             const auto wrote = sf_writef_float(outfile.get(), outmem.data(),
-                static_cast<sf_count_t>(got));
+                gsl::narrow<sf_count_t>(got));
             if(wrote < 0)
-                fmt::println(stderr, " ... failed to write samples: {}", sf_error(outfile.get()));
+                fmt::println(std::cerr, " ... failed to write samples: {}",
+                    sf_error(outfile.get()));
             else
-                total_wrote += static_cast<size_t>(wrote);
+                total_wrote += gsl::narrow<size_t>(wrote);
         }
-        fmt::println(" ... wrote {} samples ({}).", total_wrote, ininfo.frames);
+        fmt::println(" ... wrote {} samples ({} total, {} clipped).", total_wrote, ininfo.frames,
+            clipped_samples);
         ++num_encoded;
     });
 
     if(num_encoded == 0)
-        fmt::println(stderr, "Failed to encode any input files");
+        fmt::println(std::cerr, "Failed to encode any input files");
     else if(num_encoded < num_files)
-        fmt::println(stderr, "Encoded {} of {} files", num_encoded, num_files);
+        fmt::println(std::cerr, "Encoded {} of {} files", num_encoded, num_files);
     else
         fmt::println("Encoded {}{} file{}", (num_encoded > 1) ? "all " : "", num_encoded,
             (num_encoded == 1) ? "" : "s");
@@ -579,8 +586,7 @@ auto main(std::span<std::string_view> args) -> int
 
 auto main(int argc, char **argv) -> int
 {
-    assert(argc >= 0);
-    auto args = std::vector<std::string_view>(static_cast<unsigned int>(argc));
+    auto args = std::vector<std::string_view>(gsl::narrow<unsigned>(argc));
     std::ranges::copy(std::views::counted(argv, argc), args.begin());
     return main(std::span{args});
 }

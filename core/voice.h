@@ -19,7 +19,6 @@
 #include "filters/splitter.h"
 #include "mixer/defs.h"
 #include "mixer/hrtfdefs.h"
-#include "opthelpers.h"
 #include "resampler_limits.h"
 #include "uhjfilter.h"
 #include "vector.h"
@@ -51,17 +50,9 @@ enum class DirectMode : unsigned char {
 inline constexpr uint MaxPitch{10};
 
 
-enum {
-    AF_None = 0,
-    AF_LowPass = 1,
-    AF_HighPass = 2,
-    AF_BandPass = AF_LowPass | AF_HighPass
-};
-
-
 struct DirectParams {
-    BiquadFilter LowPass;
-    BiquadFilter HighPass;
+    BiquadInterpFilter LowPass;
+    BiquadInterpFilter HighPass;
 
     NfcFilter NFCtrlFilter;
 
@@ -80,8 +71,8 @@ struct DirectParams {
 };
 
 struct SendParams {
-    BiquadFilter LowPass;
-    BiquadFilter HighPass;
+    BiquadInterpFilter LowPass;
+    BiquadInterpFilter HighPass;
 
     struct GainParams {
         std::array<float,MaxAmbiChannels> Current{};
@@ -107,6 +98,7 @@ struct VoiceBufferItem {
 protected:
     ~VoiceBufferItem() = default;
 };
+using LPVoiceBufferItem = VoiceBufferItem*;
 
 
 struct VoiceProps {
@@ -184,7 +176,7 @@ enum : uint {
     VoiceFlagCount
 };
 
-struct SIMDALIGN Voice {
+struct Voice {
     enum State {
         Stopped,
         Playing,
@@ -240,11 +232,11 @@ struct SIMDALIGN Voice {
     InterpState mResampleState;
 
     std::bitset<VoiceFlagCount> mFlags;
-    uint mNumCallbackBlocks{0};
-    uint mCallbackBlockBase{0};
+    uint mNumCallbackBlocks{0u};
+    uint mCallbackBlockOffset{0u};
 
     struct TargetData {
-        int FilterType{};
+        bool FilterActive{};
         std::span<FloatBufferLine> Buffer;
     };
     TargetData mDirect;
@@ -281,6 +273,6 @@ struct SIMDALIGN Voice {
     static void InitMixer(std::optional<std::string> resopt);
 };
 
-inline Resampler ResamplerDefault{Resampler::Spline};
+inline auto ResamplerDefault = Resampler::Spline;
 
 #endif /* CORE_VOICE_H */

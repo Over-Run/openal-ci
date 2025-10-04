@@ -9,27 +9,29 @@
 #include <cstdarg>
 #include <cstddef>
 #include <cstdio>
+#include <format>
 #include <fstream>
 #include <iterator>
 #include <span>
 #include <sstream>
 #include <string>
 
+#include "alnumeric.h"
 #include "alstring.h"
 #include "filesystem.h"
-#include "fmt/core.h"
+#include "gsl/gsl"
 
 
 namespace {
 
-std::string read_word(std::istream &f)
+auto read_word(std::istream &f) -> std::string
 {
-    std::string ret;
+    auto ret = std::string{};
     f >> ret;
     return ret;
 }
 
-bool is_at_end(const std::string &buffer, std::size_t endpos)
+auto is_at_end(const std::string &buffer, std::size_t endpos) -> bool
 {
     while(endpos < buffer.length() && std::isspace(buffer[endpos]))
         ++endpos;
@@ -45,39 +47,37 @@ enum class ReaderScope {
 };
 
 template<typename ...Args>
-auto make_error(size_t linenum, fmt::format_string<Args...> fmt, Args&& ...args)
-    -> std::optional<std::string>
+auto make_error(size_t linenum, std::format_string<Args...> fmt, Args&& ...args)
+    -> al::unexpected<std::string>
 {
-    std::optional<std::string> ret;
-    auto &str = ret.emplace(fmt::format("Line {}: ", linenum));
-    str += fmt::format(std::move(fmt), std::forward<Args>(args)...);
-    return ret;
+    auto str = std::format("Line {}: ", linenum);
+    str += std::format(std::move(fmt), std::forward<Args>(args)...);
+    return al::unexpected(std::move(str));
 }
 
 } // namespace
 
-AmbDecConf::~AmbDecConf() = default;
 
-
-std::optional<std::string> AmbDecConf::load(const char *fname) noexcept
+auto AmbDecConf::load(const std::string_view fname) noexcept
+    -> al::expected<std::monostate,std::string>
 {
     auto f = fs::ifstream{fs::path(al::char_as_u8(fname))};
     if(!f.is_open())
-        return fmt::format("Failed to open file \"{}\"", fname);
+        return al::unexpected(std::format("Failed to open file \"{}\"", fname));
 
-    ReaderScope scope{ReaderScope::Global};
-    size_t speaker_pos{0};
-    size_t lfmatrix_pos{0};
-    size_t hfmatrix_pos{0};
-    size_t linenum{0};
+    auto scope = ReaderScope::Global;
+    auto speaker_pos = 0_uz;
+    auto lfmatrix_pos = 0_uz;
+    auto hfmatrix_pos = 0_uz;
+    auto linenum = 0_uz;
 
-    std::string buffer;
+    auto buffer = std::string{};
     while(f.good() && std::getline(f, buffer))
     {
         ++linenum;
 
-        std::istringstream istr{buffer};
-        std::string command{read_word(istr)};
+        auto istr = std::istringstream{buffer};
+        auto command = read_word(istr);
         if(command.empty() || command[0] == '#')
             continue;
 
@@ -96,12 +96,15 @@ std::optional<std::string> AmbDecConf::load(const char *fname) noexcept
                 if(speaker_pos == Speakers.size())
                     return make_error(linenum, "Too many speakers specified");
 
-                AmbDecConf::SpeakerConf &spkr = Speakers[speaker_pos++];
+                auto &spkr = Speakers[speaker_pos++];
                 istr >> spkr.Name;
                 istr >> spkr.Distance;
                 istr >> spkr.Azimuth;
                 istr >> spkr.Elevation;
                 istr >> spkr.Connection;
+                if(!(spkr.Distance >= 0.0f && std::isfinite(spkr.Distance)))
+                    return make_error(linenum, "Invalid speaker {} distance: {}", speaker_pos,
+                        spkr.Distance);
             }
             else
                 return make_error(linenum, "Unexpected speakers command: {}", command);
@@ -114,9 +117,9 @@ std::optional<std::string> AmbDecConf::load(const char *fname) noexcept
 
             if(command == "order_gain")
             {
-                size_t toread{(ChanMask > Ambi3OrderMask) ? 5u : 4u};
-                std::size_t curgain{0u};
-                float value{};
+                auto toread = (ChanMask > Ambi3OrderMask) ? 5_uz : 4_uz;
+                auto curgain = 0_uz;
+                auto value = float{};
                 while(toread)
                 {
                     --toread;
@@ -130,15 +133,15 @@ std::optional<std::string> AmbDecConf::load(const char *fname) noexcept
                 if(pos == Speakers.size())
                     return make_error(linenum, "Too many matrix rows specified");
 
-                unsigned int mask{ChanMask};
+                auto mask = ChanMask;
 
-                AmbDecConf::CoeffArray &mtxrow = matrix[pos++];
+                auto &mtxrow = matrix[pos++];
                 mtxrow.fill(0.0f);
 
-                float value{};
+                auto value = float{};
                 while(mask)
                 {
-                    auto idx = static_cast<unsigned>(std::countr_zero(mask));
+                    auto idx = gsl::narrow_cast<unsigned>(std::countr_zero(mask));
                     mask &= ~(1u << idx);
 
                     istr >> value;
@@ -189,7 +192,7 @@ std::optional<std::string> AmbDecConf::load(const char *fname) noexcept
         {
             if(!Speakers.empty())
                 return make_error(linenum, "Duplicate speakers");
-            size_t numspeakers{};
+            auto numspeakers = size_t{};
             istr >> numspeakers;
             if(!numspeakers)
                 return make_error(linenum, "Invalid speakers: {}", numspeakers);
@@ -200,7 +203,7 @@ std::optional<std::string> AmbDecConf::load(const char *fname) noexcept
             if(CoeffScale != AmbDecScale::Unset)
                 return make_error(linenum, "Duplicate coeff_scale");
 
-            std::string scale{read_word(istr)};
+            auto scale = read_word(istr);
             if(scale == "n3d") CoeffScale = AmbDecScale::N3D;
             else if(scale == "sn3d") CoeffScale = AmbDecScale::SN3D;
             else if(scale == "fuma") CoeffScale = AmbDecScale::FuMa;
@@ -264,7 +267,7 @@ std::optional<std::string> AmbDecConf::load(const char *fname) noexcept
         }
         else if(command == "/end")
         {
-            const auto endpos = static_cast<std::size_t>(istr.tellg());
+            const auto endpos = gsl::narrow_cast<std::size_t>(istr.tellg());
             if(!is_at_end(buffer, endpos))
                 return make_error(linenum, "Extra junk on end: {}",
                     std::string_view{buffer}.substr(endpos));
@@ -275,13 +278,13 @@ std::optional<std::string> AmbDecConf::load(const char *fname) noexcept
             if(CoeffScale == AmbDecScale::Unset)
                 return make_error(linenum, "No coefficient scaling defined");
 
-            return std::nullopt;
+            return std::monostate{};
         }
         else
             return make_error(linenum, "Unexpected command: {}", command);
 
         istr.clear();
-        const auto endpos = static_cast<std::size_t>(istr.tellg());
+        const auto endpos = gsl::narrow_cast<std::size_t>(istr.tellg());
         if(!is_at_end(buffer, endpos))
             return make_error(linenum, "Extra junk on line: {}",
                 std::string_view{buffer}.substr(endpos));

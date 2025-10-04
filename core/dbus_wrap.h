@@ -28,10 +28,12 @@ MAGIC(dbus_message_iter_get_arg_type) \
 MAGIC(dbus_message_iter_get_basic) \
 MAGIC(dbus_set_error_from_message)
 
+/* NOLINTBEGIN(misc-use-internal-linkage) What? No. */
 inline void *dbus_handle{};
 #define DECL_FUNC(x) inline decltype(x) *p##x{};
 DBUS_FUNCTIONS(DECL_FUNC)
 #undef DECL_FUNC
+ /* NOLINTEND(misc-use-internal-linkage) */
 
 #ifndef IN_IDE_PARSER
 #define dbus_error_init (*pdbus_error_init)
@@ -85,7 +87,7 @@ private:
 };
 
 struct ConnectionDeleter {
-    void operator()(DBusConnection *c) { dbus_connection_unref(c); }
+    void operator()(DBusConnection *c) const { dbus_connection_unref(c); }
 };
 using ConnectionPtr = std::unique_ptr<DBusConnection,ConnectionDeleter>;
 

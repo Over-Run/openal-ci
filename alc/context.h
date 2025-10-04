@@ -5,12 +5,16 @@
 
 #include <atomic>
 #include <bitset>
+#include <concepts>
 #include <cstdint>
 #include <deque>
+#include <format>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -22,8 +26,9 @@
 #include "al/listener.h"
 #include "althreads.h"
 #include "core/context.h"
-#include "fmt/core.h"
+#include "gsl/gsl"
 #include "intrusive_ptr.h"
+#include "opthelpers.h"
 
 #if ALSOFT_EAX
 #include "al/eax/api.h"
@@ -72,19 +77,22 @@ struct DebugLogEntry {
 };
 
 
+struct ALCcontext { };
+
 namespace al {
 struct Device;
-} // namespace al
+struct Context;
 
-struct ALCcontext final : public al::intrusive_ref<ALCcontext>, ContextBase {
-    const al::intrusive_ptr<al::Device> mALDevice;
+struct ContextDeleter { void operator()(gsl::owner<Context*> context) const noexcept; };
+struct Context final : public ALCcontext, intrusive_ref<Context,ContextDeleter>, ContextBase {
+    const gsl::not_null<intrusive_ptr<Device>> mALDevice;
 
     bool mPropsDirty{true};
     bool mDeferUpdates{false};
 
     std::mutex mPropLock;
 
-    al::tss<ALenum> mLastThreadError{AL_NO_ERROR};
+    tss<ALenum> mLastThreadError{AL_NO_ERROR};
 
     const ContextFlagBitset mContextFlags;
     std::atomic<bool> mDebugEnabled{false};
@@ -126,16 +134,9 @@ struct ALCcontext final : public al::intrusive_ref<ALCcontext>, ContextBase {
     std::unordered_map<ALuint,std::string> mSourceNames;
     std::unordered_map<ALuint,std::string> mEffectSlotNames;
 
-    ALCcontext(al::intrusive_ptr<al::Device> device, ContextFlagBitset flags);
-    ALCcontext(const ALCcontext&) = delete;
-    ALCcontext& operator=(const ALCcontext&) = delete;
-    ~ALCcontext() final;
-
-    void init();
     /**
-     * Removes the context from its device and removes it from being current on
-     * the running thread or globally. Stops device playback if this was the
-     * last context on its device.
+     * Removes the context from being current on the running thread or
+     * globally, and stops the event thread.
      */
     void deinit();
 
@@ -162,18 +163,18 @@ struct ALCcontext final : public al::intrusive_ref<ALCcontext>, ContextBase {
      */
     void applyAllUpdates();
 
-    void setErrorImpl(ALenum errorCode, const fmt::string_view fmt, fmt::format_args args);
+    void setErrorImpl(ALenum errorCode, const std::string_view fmt, std::format_args args);
 
     template<typename ...Args>
-    void setError(ALenum errorCode, fmt::format_string<Args...> msg, Args&& ...args)
-    { setErrorImpl(errorCode, msg, fmt::make_format_args(args...)); }
+    void setError(ALenum errorCode, std::format_string<Args...> msg, Args&& ...args)
+    { setErrorImpl(errorCode, msg.get(), std::make_format_args(args...)); }
 
     [[noreturn]]
-    void throw_error_impl(ALenum errorCode, const fmt::string_view fmt, fmt::format_args args);
+    void throw_error_impl(ALenum errorCode, const std::string_view fmt, std::format_args args);
 
     template<typename ...Args> [[noreturn]]
-    void throw_error(ALenum errorCode, fmt::format_string<Args...> fmt, Args&&... args)
-    { throw_error_impl(errorCode, fmt, fmt::make_format_args(args...)); }
+    void throw_error(ALenum errorCode, std::format_string<Args...> fmt, Args&&... args)
+    { throw_error_impl(errorCode, fmt.get(), std::make_format_args(args...)); }
 
     void sendDebugMessage(std::unique_lock<std::mutex> &debuglock, DebugSource source,
         DebugType type, ALuint id, DebugSeverity severity, std::string_view message);
@@ -187,13 +188,23 @@ struct ALCcontext final : public al::intrusive_ref<ALCcontext>, ContextBase {
         sendDebugMessage(debuglock, source, type, id, severity, message);
     }
 
+    static auto Create(const gsl::not_null<intrusive_ptr<Device>> &device, ContextFlagBitset flags)
+        -> intrusive_ptr<Context>;
+
     /* Process-wide current context */
     static std::atomic<bool> sGlobalContextLock;
-    static std::atomic<ALCcontext*> sGlobalContext;
+    static std::atomic<Context*> sGlobalContext;
+
+protected:
+    ~Context();
 
 private:
+    Context(const gsl::not_null<intrusive_ptr<Device>> &device, ContextFlagBitset flags);
+
+    void init();
+
     /* Thread-local current context. */
-    static inline thread_local ALCcontext *sLocalContext{};
+    static inline thread_local Context *sLocalContext{};
 
     /* Thread-local context handling. This handles attempting to release the
      * context which may have been left current when the thread is destroyed.
@@ -211,14 +222,16 @@ private:
          * clear sLocalContext (which isn't a member variable to make read
          * access efficient).
          */
-        void set(ALCcontext *ctx) const noexcept { sLocalContext = ctx; }
+        void set(Context *ctx) const noexcept { sLocalContext = ctx; }
         /* NOLINTEND(readability-convert-member-functions-to-static) */
     };
     static thread_local ThreadCtx sThreadContext;
 
+    friend ContextDeleter;
+
 public:
-    static ALCcontext *getThreadContext() noexcept { return sLocalContext; }
-    static void setThreadContext(ALCcontext *context) noexcept { sThreadContext.set(context); }
+    static Context *getThreadContext() noexcept { return sLocalContext; }
+    static void setThreadContext(Context *context) noexcept { sThreadContext.set(context); }
 
     /* Default effect that applies to sources that don't have an effect on send 0. */
     static ALeffect sDefaultEffect;
@@ -229,19 +242,11 @@ public:
 
     void eaxUninitialize() noexcept;
 
-    ALenum eax_eax_set(
-        const GUID* property_set_id,
-        ALuint property_id,
-        ALuint property_source_id,
-        ALvoid* property_value,
-        ALuint property_value_size);
+    ALenum eax_eax_set(const GUID *property_set_id, ALuint property_id, ALuint property_source_id,
+        ALvoid *property_value, ALuint property_value_size);
 
-    ALenum eax_eax_get(
-        const GUID* property_set_id,
-        ALuint property_id,
-        ALuint property_source_id,
-        ALvoid* property_value,
-        ALuint property_value_size);
+    ALenum eax_eax_get(const GUID *property_set_id, ALuint property_id, ALuint property_source_id,
+        ALvoid *property_value, ALuint property_value_size);
 
     void eaxSetLastError() noexcept;
 
@@ -252,16 +257,15 @@ public:
     auto eaxGetPrimaryFxSlotIndex() const noexcept -> EaxFxSlotIndex
     { return mEaxPrimaryFxSlotIndex; }
 
-    const ALeffectslot& eaxGetFxSlot(EaxFxSlotIndexValue fx_slot_index) const
+    const ALeffectslot& eaxGetFxSlot(EaxFxSlotIndexValue fx_slot_index) const LIFETIMEBOUND
     { return mEaxFxSlots.get(fx_slot_index); }
-    ALeffectslot& eaxGetFxSlot(EaxFxSlotIndexValue fx_slot_index)
+    ALeffectslot& eaxGetFxSlot(EaxFxSlotIndexValue fx_slot_index) LIFETIMEBOUND
     { return mEaxFxSlots.get(fx_slot_index); }
 
     bool eaxNeedsCommit() const noexcept { return mEaxNeedsCommit; }
     void eaxCommit();
 
-    void eaxCommitFxSlots()
-    { mEaxFxSlots.commit(); }
+    void eaxCommitFxSlots() const { mEaxFxSlots.commit(); }
 
 private:
     enum {
@@ -287,9 +291,10 @@ private:
         Eax5Props d; // Deferred.
     };
 
+    /* NOLINTNEXTLINE(clazy-copyable-polymorphic) Exceptions must be copyable. */
     class ContextException final : public EaxException {
     public:
-        explicit ContextException(const char *message)
+        explicit ContextException(const std::string_view message)
             : EaxException{"EAX_CONTEXT", message}
         { }
     };
@@ -446,59 +451,48 @@ private:
     Eax5Props mEax{}; // Current EAX state.
     EAXSESSIONPROPERTIES mEaxSession{};
 
-    [[noreturn]] static void eax_fail(const char* message);
+    [[noreturn]] static void eax_fail(const std::string_view message);
     [[noreturn]] static void eax_fail_unknown_property_set_id();
     [[noreturn]] static void eax_fail_unknown_primary_fx_slot_id();
     [[noreturn]] static void eax_fail_unknown_property_id();
     [[noreturn]] static void eax_fail_unknown_version();
 
-    // Gets a value from EAX call,
-    // validates it,
-    // and updates the current value.
-    template<typename TValidator, typename TProperty>
-    static void eax_set(const EaxCall& call, TProperty& property)
+    /* Gets a value from EAX call, validates it, and updates the current value. */
+    template<typename TValidator>
+    static void eax_set(const EaxCall &call, auto &property)
     {
-        const auto& value = call.get_value<ContextException, const TProperty>();
+        const auto &value = call.load<const std::remove_cvref_t<decltype(property)>>();
         TValidator{}(value);
         property = value;
     }
 
-    // Gets a new value from EAX call,
-    // validates it,
-    // updates the deferred value,
-    // updates a dirty flag.
-    template<
-        typename TValidator,
-        size_t DirtyBit,
-        typename TMemberResult,
-        typename TProps,
-        typename TState>
-    void eax_defer(const EaxCall& call, TState& state, TMemberResult TProps::*member)
+    /* Gets a new value from EAX call, validates it, updates the deferred
+     * value, and updates a dirty flag.
+     */
+    template<typename TValidator>
+    void eax_defer(const EaxCall &call, auto &state, size_t dirty_bit, auto member)
     {
-        const auto& src = call.get_value<ContextException, const TMemberResult>();
+        static_assert(std::invocable<decltype(member), decltype(state.i)>);
+        using TMemberResult = std::invoke_result_t<decltype(member), decltype(state.i)>;
+        const auto &src = call.load<const std::remove_cvref_t<TMemberResult>>();
         TValidator{}(src);
-        const auto& dst_i = state.i.*member;
-        auto& dst_d = state.d.*member;
+        const auto &dst_i = std::invoke(member, state.i);
+        auto &dst_d = std::invoke(member, state.d);
         dst_d = src;
 
         if(dst_i != dst_d)
-            mEaxDf.set(DirtyBit);
+            mEaxDf.set(dirty_bit);
     }
 
-    template<
-        size_t DirtyBit,
-        typename TMemberResult,
-        typename TProps,
-        typename TState>
-    void eax_context_commit_property(TState& state, std::bitset<eax_dirty_bit_count>& dst_df,
-        TMemberResult TProps::*member) noexcept
+    void eax_context_commit_property(auto &state, std::bitset<eax_dirty_bit_count> &dst_df,
+        size_t dirty_bit, std::invocable<decltype(mEax)> auto member) noexcept
     {
-        if(mEaxDf.test(DirtyBit))
+        if(mEaxDf.test(dirty_bit))
         {
-            dst_df.set(DirtyBit);
-            const auto& src_d = state.d.*member;
-            state.i.*member = src_d;
-            mEax.*member = src_d;
+            dst_df.set(dirty_bit);
+            const auto &src_d = std::invoke(member, state.d);
+            std::invoke(member, state.i) = src_d;
+            std::invoke(member, mEax) = src_d;
         }
     }
 
@@ -509,7 +503,7 @@ private:
     void eax_ensure_no_default_effect_slot() const;
     bool eax_has_enough_aux_sends() const noexcept;
     void eax_ensure_enough_aux_sends() const;
-    void eax_ensure_compatibility();
+    void eax_ensure_compatibility() const;
 
     unsigned long eax_detect_speaker_configuration() const;
     void eax_update_speaker_configuration();
@@ -534,8 +528,8 @@ private:
     void eax_context_commit_primary_fx_slot_id();
     void eax_context_commit_distance_factor();
     void eax_context_commit_air_absorption_hf();
-    void eax_context_commit_hf_reference();
-    void eax_context_commit_macro_fx_factor();
+    static void eax_context_commit_hf_reference();
+    static void eax_context_commit_macro_fx_factor();
 
     void eax_initialize_fx_slots();
 
@@ -554,11 +548,13 @@ private:
 #endif // ALSOFT_EAX
 };
 
-using ContextRef = al::intrusive_ptr<ALCcontext>;
+} // namespace al
+
+using ContextRef = al::intrusive_ptr<al::Context>;
 
 ContextRef GetContextRef() noexcept;
 
-void UpdateContextProps(ALCcontext *context);
+void UpdateContextProps(al::Context *context);
 
 
 inline bool TrapALError{false};

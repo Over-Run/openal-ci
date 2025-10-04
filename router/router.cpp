@@ -1,12 +1,16 @@
 
 #include "config.h"
 
+#if !HAVE_CXXMODULES
 #include "router.h"
+#endif
+
+#include <windows.h>
+#include <winnt.h>
 
 #include <algorithm>
 #include <array>
 #include <bit>
-#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -15,18 +19,23 @@
 #include <string_view>
 #include <vector>
 
-#include "AL/alc.h"
-#include "AL/al.h"
-
 #include "alstring.h"
+#include "filesystem.h"
 #include "opthelpers.h"
-#include "strutils.h"
+#include "strutils.hpp"
 
 #include "version.h"
 
+#if HAVE_CXXMODULES
+import alsoft.router;
+import gsl;
+import openal.alc;
 
-eLogLevel LogLevel{eLogLevel::Error};
-gsl::owner<std::FILE*> LogFile;
+#else
+
+#include "AL/alc.h"
+#include "gsl/gsl"
+#endif
 
 namespace {
 
@@ -94,7 +103,7 @@ void AddModule(HMODULE module, const std::wstring_view name)
 
     /* Load required functions. */
     auto loadok = true;
-    auto do_load = [module,name](auto &func, const char *fname) -> bool
+    auto do_load = [module,name](auto &func, const gsl::czstring fname) -> bool
     {
         using func_t = std::remove_reference_t<decltype(func)>;
         auto ptr = GetProcAddress(module, fname);
@@ -204,7 +213,7 @@ void AddModule(HMODULE module, const std::wstring_view name)
             newdrv.ALCVer = MakeALCVer(1, 0);
         }
 
-        auto do_load2 = [module,name](auto &func, const char *fname) -> void
+        auto do_load2 = [module,name](auto &func, const gsl::czstring fname) -> void
         {
             using func_t = std::remove_reference_t<decltype(func)>;
             auto ptr = GetProcAddress(module, fname);
@@ -229,7 +238,7 @@ void AddModule(HMODULE module, const std::wstring_view name)
         LOAD_PROC(alGetBufferiv);
 #undef LOAD_PROC
 
-        auto do_load3 = [name,&newdrv](auto &func, const char *fname) -> bool
+        auto do_load3 = [name,&newdrv](auto &func, const gsl::czstring fname) -> bool
         {
             using func_t = std::remove_reference_t<decltype(func)>;
             auto ptr = newdrv.alcGetProcAddress(nullptr, fname);
@@ -248,6 +257,12 @@ void AddModule(HMODULE module, const std::wstring_view name)
         {
             LOAD_PROC(alcSetThreadContext);
             LOAD_PROC(alcGetThreadContext);
+        }
+        if(newdrv.alcIsExtensionPresent(nullptr, "ALC_SOFT_loopback"))
+        {
+            LOAD_PROC(alcLoopbackOpenDeviceSOFT);
+            LOAD_PROC(alcIsRenderFormatSupportedSOFT);
+            LOAD_PROC(alcRenderSamplesSOFT);
         }
 #undef LOAD_PROC
     }
@@ -297,12 +312,13 @@ auto GetLoadedModuleDirectory(const WCHAR *name, std::wstring *moddir) -> bool
     }
 
     moddir->assign(256, '\0');
-    auto res = GetModuleFileNameW(module, moddir->data(), static_cast<DWORD>(moddir->size()));
+    auto res = GetModuleFileNameW(module, moddir->data(), gsl::narrow_cast<DWORD>(moddir->size()));
     if(res >= moddir->size())
     {
         do {
             moddir->append(256, '\0');
-            res = GetModuleFileNameW(module, moddir->data(), static_cast<DWORD>(moddir->size()));
+            res = GetModuleFileNameW(module, moddir->data(),
+                gsl::narrow_cast<DWORD>(moddir->size()));
         } while(res >= moddir->size());
     }
     moddir->resize(res);
@@ -415,6 +431,7 @@ void LoadDriverList()
         std::swap(*DriverList.begin(), *(DriverList.begin()+1));
 }
 
+/* NOLINTNEXTLINE(misc-use-internal-linkage) Needs external linkage for Windows. */
 auto APIENTRY DllMain(HINSTANCE, DWORD reason, void*) -> BOOL
 {
     switch(reason)
@@ -422,15 +439,13 @@ auto APIENTRY DllMain(HINSTANCE, DWORD reason, void*) -> BOOL
     case DLL_PROCESS_ATTACH:
         if(auto logfname = al::getenv(L"ALROUTER_LOGFILE"))
         {
-            gsl::owner<std::FILE*> f{_wfopen(logfname->c_str(), L"w")};
-            if(f == nullptr)
+            LogFile.open(fs::path(*logfname));
+            if(!LogFile.is_open())
                 ERR("Could not open log file: {}", wstr_to_utf8(*logfname));
-            else
-                LogFile = f;
         }
         if(auto loglev = al::getenv("ALROUTER_LOGLEVEL"))
         {
-            char *end{};
+            auto end = gsl::zstring{};
             auto l = strtol(loglev->c_str(), &end, 0);
             if(!end || *end != '\0')
                 ERR("Invalid log level value: {}", *loglev);
@@ -438,7 +453,7 @@ auto APIENTRY DllMain(HINSTANCE, DWORD reason, void*) -> BOOL
                 || l > al::to_underlying(eLogLevel::Trace))
                 ERR("Log level out of range: {}", *loglev);
             else
-                LogLevel = static_cast<eLogLevel>(l);
+                LogLevel = gsl::narrow_cast<eLogLevel>(l);
         }
         break;
 
@@ -449,10 +464,6 @@ auto APIENTRY DllMain(HINSTANCE, DWORD reason, void*) -> BOOL
 
     case DLL_PROCESS_DETACH:
         DriverList.clear();
-
-        if(LogFile)
-            fclose(LogFile);
-        LogFile = nullptr;
 
         break;
     }

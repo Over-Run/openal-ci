@@ -13,13 +13,14 @@
 #include <span>
 
 #include "alnumeric.h"
+#include "gsl/gsl"
 #include "opthelpers.h"
 
 
 /* These structures assume BufferLineSize is a power of 2. */
 static_assert((BufferLineSize & (BufferLineSize-1)) == 0, "BufferLineSize is not a power of 2");
 
-struct SIMDALIGN SlidingHold {
+struct SlidingHold {
     alignas(16) FloatBufferLine mValues;
     std::array<uint,BufferLineSize> mExpiries;
     uint mLowerIndex;
@@ -107,9 +108,9 @@ auto Compressor::Create(const size_t NumChans, const float SampleRate, const Fla
     const float ThresholdDb, const float Ratio, const float KneeDb, const float AttackTime,
     const float ReleaseTime) -> std::unique_ptr<Compressor>
 {
-    const auto lookAhead = static_cast<uint>(std::clamp(std::round(LookAheadTime*SampleRate), 0.0f,
-        BufferLineSize-1.0f));
-    const auto hold = static_cast<uint>(std::clamp(std::round(HoldTime*SampleRate), 0.0f,
+    const auto lookAhead = gsl::narrow_cast<uint>(std::clamp(std::round(LookAheadTime*SampleRate),
+        0.0f, BufferLineSize-1.0f));
+    const auto hold = gsl::narrow_cast<uint>(std::clamp(std::round(HoldTime*SampleRate), 0.0f,
         BufferLineSize-1.0f));
 
     auto Comp = std::make_unique<Compressor>(PrivateToken{});
@@ -131,7 +132,7 @@ auto Compressor::Create(const size_t NumChans, const float SampleRate, const Fla
      * varying the knee width, it can effectively be seen as applying
      * compression over a wide range of ratios.
      */
-    if(AutoKnee)
+    if(AutoFlags.test(AutoKnee))
         Comp->mSlope = -1.0f;
 
     if(lookAhead > 0)
@@ -354,7 +355,7 @@ void Compressor::process(const uint SamplesToDo, const std::span<FloatBufferLine
 
             if(SamplesToDo >= delaybuf.size()) [[likely]]
             {
-                const auto inout_start = inout.end() - ptrdiff_t(delaybuf.size());
+                const auto inout_start = std::prev(inout.end(), std::ssize(delaybuf));
                 const auto delay_end = std::ranges::rotate(inout, inout_start).begin();
                 std::ranges::swap_ranges(std::span{inout.begin(), delay_end}, delaybuf);
             }

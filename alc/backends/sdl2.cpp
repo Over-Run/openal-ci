@@ -22,7 +22,6 @@
 
 #include "sdl2.h"
 
-#include <cassert>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -30,6 +29,7 @@
 
 #include "alnumeric.h"
 #include "core/device.h"
+#include "gsl/gsl"
 #include "pragmadefs.h"
 
 DIAGNOSTIC_PUSH
@@ -46,7 +46,7 @@ using namespace std::string_view_literals;
 { return "Default Device"sv; }
 
 struct Sdl2Backend final : public BackendBase {
-    explicit Sdl2Backend(DeviceBase *device) noexcept : BackendBase{device} { }
+    explicit Sdl2Backend(gsl::not_null<DeviceBase*> device) noexcept : BackendBase{device} { }
     ~Sdl2Backend() override;
 
     void audioCallback(Uint8 *stream, int len) noexcept;
@@ -70,8 +70,7 @@ Sdl2Backend::~Sdl2Backend()
 
 void Sdl2Backend::audioCallback(Uint8 *stream, int len) noexcept
 {
-    const auto ulen = static_cast<unsigned int>(len);
-    assert((ulen % mFrameSize) == 0);
+    const auto ulen = gsl::narrow_cast<unsigned int>(len);
     mDevice->renderSamples(stream, ulen / mFrameSize, mDevice->channelsFromFmt());
 }
 
@@ -90,8 +89,7 @@ void Sdl2Backend::open(std::string_view name)
     case DevFmtInt: want.format = AUDIO_S32SYS; break;
     case DevFmtFloat: want.format = AUDIO_F32; break;
     }
-    want.channels = static_cast<Uint8>(std::min<uint>(mDevice->channelsFromFmt(),
-        std::numeric_limits<Uint8>::max()));
+    want.channels = al::saturate_cast<Uint8>(mDevice->channelsFromFmt());
     want.samples = static_cast<Uint16>(std::min(mDevice->mUpdateSize, 8192u));
     want.callback = [](void *ptr, Uint8 *stream, int len) noexcept
     { return static_cast<Sdl2Backend*>(ptr)->audioCallback(stream, len); };
@@ -154,8 +152,7 @@ bool Sdl2Backend::reset()
     case DevFmtInt: want.format = AUDIO_S32SYS; break;
     case DevFmtFloat: want.format = AUDIO_F32; break;
     }
-    want.channels = static_cast<Uint8>(std::min<uint>(mDevice->channelsFromFmt(),
-        std::numeric_limits<Uint8>::max()));
+    want.channels = al::saturate_cast<Uint8>(mDevice->channelsFromFmt());
     want.samples = static_cast<Uint16>(std::min(mDevice->mUpdateSize, 8192u));
     want.callback = [](void *ptr, Uint8 *stream, int len) noexcept
     { return static_cast<Sdl2Backend*>(ptr)->audioCallback(stream, len); };
@@ -255,7 +252,7 @@ auto SDL2BackendFactory::enumerate(BackendType type) -> std::vector<std::string>
     if(num_devices <= 0)
         return outnames;
 
-    outnames.reserve(static_cast<unsigned int>(num_devices)+1_uz);
+    outnames.reserve(gsl::narrow_cast<unsigned int>(num_devices)+1_uz);
     outnames.emplace_back(getDefaultDeviceName());
     for(int i{0};i < num_devices;++i)
     {
@@ -267,7 +264,8 @@ auto SDL2BackendFactory::enumerate(BackendType type) -> std::vector<std::string>
     return outnames;
 }
 
-BackendPtr SDL2BackendFactory::createBackend(DeviceBase *device, BackendType type)
+auto SDL2BackendFactory::createBackend(gsl::not_null<DeviceBase*> device, BackendType type)
+    -> BackendPtr
 {
     if(type == BackendType::Playback)
         return BackendPtr{new Sdl2Backend{device}};

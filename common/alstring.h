@@ -1,22 +1,12 @@
 #ifndef AL_STRING_H
 #define AL_STRING_H
 
-#include <algorithm>
-#include <cstddef>
-#include <limits>
 #include <string_view>
+
+#include "opthelpers.h"
 
 
 namespace al {
-
-[[nodiscard]] constexpr
-auto sizei(const std::string_view str) noexcept -> int
-{ return static_cast<int>(std::min<std::size_t>(str.size(), std::numeric_limits<int>::max())); }
-
-[[nodiscard]] constexpr
-auto sizei(const std::wstring_view str) noexcept -> int
-{ return static_cast<int>(std::min<std::size_t>(str.size(), std::numeric_limits<int>::max())); }
-
 
 [[nodiscard]]
 constexpr bool contains(const std::string_view str0, const std::string_view str1) noexcept
@@ -36,10 +26,10 @@ auto case_compare(const std::wstring_view str0, const std::wstring_view str1) no
  * strings. So these functions are used to reinterpret between char and char8_t
  * string views.
  */
-inline auto char_as_u8(const std::string_view str) -> std::u8string_view
+inline auto char_as_u8(const std::string_view str LIFETIMEBOUND) -> std::u8string_view
 { return std::u8string_view{reinterpret_cast<const char8_t*>(str.data()), str.size()}; }
 
-inline auto u8_as_char(const std::u8string_view str) -> std::string_view
+inline auto u8_as_char(const std::u8string_view str LIFETIMEBOUND) -> std::string_view
 { return std::string_view{reinterpret_cast<const char*>(str.data()), str.size()}; }
 /* NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast) */
 

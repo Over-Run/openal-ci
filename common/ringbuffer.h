@@ -4,8 +4,8 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <cassert>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <new>
 #include <ranges>
@@ -16,139 +16,18 @@
 #include "almalloc.h"
 #include "alnumeric.h"
 #include "flexarray.h"
+#include "gsl/gsl"
 #include "opthelpers.h"
 
 
 /* NOTE: This lockless ringbuffer implementation is copied from JACK, extended
- * to include an element size. Consequently, parameters and return values for a
- * size or count are in 'elements', not bytes. Additionally, it only supports
- * single-consumer/single-provider operation.
+ * to include a storage type and an element size. Consequently, parameters and
+ * return values for a size or count are in 'elements', not bytes. Also, it
+ * only supports single-consumer/single-provider operation.
  */
 
-struct RingBuffer {
-private:
-#if defined(__cpp_lib_hardware_interference_size) && !defined(_LIBCPP_VERSION)
-    static constexpr std::size_t sCacheAlignment{std::hardware_destructive_interference_size};
-#else
-    /* Assume a 64-byte cache line, the most common/likely value. */
-    static constexpr std::size_t sCacheAlignment{64};
-#endif
-    alignas(sCacheAlignment) std::atomic<std::size_t> mWriteCount{0u};
-    alignas(sCacheAlignment) std::atomic<std::size_t> mReadCount{0u};
-
-    alignas(sCacheAlignment) const std::size_t mWriteSize;
-    const std::size_t mSizeMask;
-    const std::size_t mElemSize;
-
-    al::FlexArray<std::byte, 16> mBuffer;
-
-public:
-    struct Data {
-        std::byte *buf;
-        std::size_t len;
-    };
-    using DataPair = std::array<Data,2>;
-
-    RingBuffer(const std::size_t writesize, const std::size_t mask, const std::size_t elemsize,
-        const std::size_t numbytes)
-        : mWriteSize{writesize}, mSizeMask{mask}, mElemSize{elemsize}, mBuffer{numbytes}
-    { }
-
-    /** Reset the read and write pointers to zero. This is not thread safe. */
-    auto reset() noexcept -> void;
-
-    /**
-     * Return the number of elements available for reading. This is the number
-     * of elements in front of the read pointer and behind the write pointer.
-     */
-    [[nodiscard]] auto readSpace() const noexcept -> std::size_t
-    {
-        const std::size_t w{mWriteCount.load(std::memory_order_acquire)};
-        const std::size_t r{mReadCount.load(std::memory_order_acquire)};
-        /* mWriteCount is never more than mWriteSize greater than mReadCount. */
-        return w - r;
-    }
-
-    /**
-     * The copying data reader. Copy at most `count' elements into `dest'.
-     * Returns the actual number of elements copied.
-     */
-    [[nodiscard]] auto read(void *dest, std::size_t count) noexcept -> std::size_t;
-    /**
-     * The copying data reader w/o read pointer advance. Copy at most `count'
-     * elements into `dest'. Returns the actual number of elements copied.
-     */
-    [[nodiscard]] auto peek(void *dest, std::size_t count) const noexcept -> std::size_t;
-
-    /**
-     * The non-copying data reader. Returns two ringbuffer data pointers that
-     * hold the current readable data. If the readable data is in one segment
-     * the second segment has zero length.
-     */
-    [[nodiscard]] auto getReadVector() noexcept -> DataPair;
-    /** Advance the read pointer `count' places. */
-    auto readAdvance(std::size_t count) noexcept -> void
-    {
-        const std::size_t w{mWriteCount.load(std::memory_order_acquire)};
-        const std::size_t r{mReadCount.load(std::memory_order_relaxed)};
-        [[maybe_unused]] const std::size_t readable{w - r};
-        assert(readable >= count);
-        mReadCount.store(r+count, std::memory_order_release);
-    }
-
-
-    /**
-     * Return the number of elements available for writing. This is the total
-     * number of writable elements excluding what's readable (already written).
-     */
-    [[nodiscard]] auto writeSpace() const noexcept -> std::size_t
-    { return mWriteSize - readSpace(); }
-
-    /**
-     * The copying data writer. Copy at most `count' elements from `src'. Returns
-     * the actual number of elements copied.
-     */
-    [[nodiscard]] auto write(const void *src, std::size_t count) noexcept -> std::size_t;
-
-    /**
-     * The non-copying data writer. Returns two ringbuffer data pointers that
-     * hold the current writeable data. If the writeable data is in one segment
-     * the second segment has zero length.
-     */
-    [[nodiscard]] auto getWriteVector() noexcept -> DataPair;
-    /** Advance the write pointer `count' places. */
-    auto writeAdvance(std::size_t count) noexcept -> void
-    {
-        const std::size_t w{mWriteCount.load(std::memory_order_relaxed)};
-        const std::size_t r{mReadCount.load(std::memory_order_acquire)};
-        [[maybe_unused]] const std::size_t writable{mWriteSize - (w - r)};
-        assert(writable >= count);
-        mWriteCount.store(w+count, std::memory_order_release);
-    }
-
-    [[nodiscard]] auto getElemSize() const noexcept -> std::size_t { return mElemSize; }
-
-    /**
-     * Create a new ringbuffer to hold at least `sz' elements of `elem_sz'
-     * bytes. The number of elements is rounded up to a power of two. If
-     * `limit_writes' is true, the writable space will be limited to `sz'
-     * elements regardless of the rounded size.
-     */
-    [[nodiscard]] static
-    auto Create(std::size_t sz, std::size_t elem_sz, bool limit_writes) -> std::unique_ptr<RingBuffer>;
-
-    DEF_FAM_NEWDEL(RingBuffer, mBuffer)
-};
-using RingBufferPtr = std::unique_ptr<RingBuffer>;
-
-
-/* A ring buffer like the above, except that the read/write vectors return
- * spans, sized according to the number of readable/writable values instead of
- * number of elements. The storage type is also templated rather than always
- * std::byte, but must be trivially copyable.
- */
 template<typename T>
-class RingBuffer2 {
+class RingBuffer {
     static_assert(std::is_trivially_copyable_v<T>);
 
 #if defined(__cpp_lib_hardware_interference_size) && !defined(_LIBCPP_VERSION)
@@ -166,13 +45,13 @@ class RingBuffer2 {
 
     al::FlexArray<T, 16> mBuffer;
 
-public:
-    using DataPair = std::array<std::span<T>,2>;
-
-    RingBuffer2(const std::size_t writesize, const std::size_t mask, const std::size_t elemsize,
+    RingBuffer(const std::size_t writesize, const std::size_t mask, const std::size_t elemsize,
         const std::size_t numvals)
         : mWriteSize{writesize}, mSizeMask{mask}, mElemSize{elemsize}, mBuffer{numvals}
     { }
+
+public:
+    using DataPair = std::array<std::span<T>,2>;
 
     /** Reset the read and write pointers to zero. This is not thread safe. */
     auto reset() noexcept -> void
@@ -272,10 +151,10 @@ public:
     /** Advance the read pointer `count' places. */
     auto readAdvance(std::size_t count) noexcept -> void
     {
-        const std::size_t w = mWriteCount.load(std::memory_order_acquire);
-        const std::size_t r = mReadCount.load(std::memory_order_relaxed);
-        const auto readable [[maybe_unused]] = w - r;
-        assert(readable >= count);
+        const auto w = mWriteCount.load(std::memory_order_acquire);
+        const auto r = mReadCount.load(std::memory_order_relaxed);
+        const auto readable = w - r;
+        Expects(readable >= count);
         mReadCount.store(r+count, std::memory_order_release);
     }
 
@@ -339,10 +218,10 @@ public:
     /** Advance the write pointer `count' places. */
     auto writeAdvance(std::size_t count) noexcept -> void
     {
-        const std::size_t w{mWriteCount.load(std::memory_order_relaxed)};
-        const std::size_t r{mReadCount.load(std::memory_order_acquire)};
-        [[maybe_unused]] const std::size_t writable{mWriteSize - (w - r)};
-        assert(writable >= count);
+        const auto w = mWriteCount.load(std::memory_order_relaxed);
+        const auto r = mReadCount.load(std::memory_order_acquire);
+        const auto writable = mWriteSize - (w - r);
+        Expects(writable >= count);
         mWriteCount.store(w+count, std::memory_order_release);
     }
 
@@ -355,10 +234,12 @@ public:
      * `limit_writes' is true, the writable space will be limited to `sz'
      * elements regardless of the rounded size.
      */
-    [[nodiscard]] static
+    [[nodiscard]] NOINLINE static
     auto Create(std::size_t sz, std::size_t elem_sz, bool limit_writes)
-        -> std::unique_ptr<RingBuffer2>
+        -> std::unique_ptr<RingBuffer>
     {
+        if(sz > std::numeric_limits<std::size_t>::max()>>1)
+            throw std::overflow_error{"Ring buffer size too large"};
         auto power_of_two = 0_uz;
         if(sz > 0)
         {
@@ -368,23 +249,22 @@ public:
             power_of_two |= power_of_two>>4;
             power_of_two |= power_of_two>>8;
             power_of_two |= power_of_two>>16;
-            if constexpr(sizeof(size_t) > sizeof(uint32_t))
-                power_of_two |= power_of_two>>32;
+            if constexpr(sizeof(size_t) > sizeof(std::uint32_t))
+                power_of_two |= (power_of_two>>16) >> 16;
         }
         ++power_of_two;
-        if(power_of_two < sz || power_of_two > std::numeric_limits<std::size_t>::max()>>1
-            || power_of_two > std::numeric_limits<std::size_t>::max()/elem_sz)
+        if(power_of_two > std::numeric_limits<std::size_t>::max()/elem_sz)
             throw std::overflow_error{"Ring buffer size overflow"};
 
         const auto numvals = power_of_two * elem_sz;
-        return std::unique_ptr<RingBuffer2>{new(FamCount(numvals)) RingBuffer2{
+        return std::unique_ptr<RingBuffer>{new(FamCount{numvals}) RingBuffer{
             limit_writes ? sz : power_of_two, power_of_two-1, elem_sz, numvals}};
     }
 
-    DEF_FAM_NEWDEL(RingBuffer2, mBuffer)
+    DEF_FAM_NEWDEL(RingBuffer, mBuffer)
 };
 template<typename T>
-using RingBuffer2Ptr = std::unique_ptr<RingBuffer2<T>>;
+using RingBufferPtr = std::unique_ptr<RingBuffer<T>>;
 
 
 /* A FIFO buffer, modelled after the above but retains type information, and
@@ -548,7 +428,7 @@ public:
         const auto w = mWriteCount.load(std::memory_order_acquire);
         const auto r = mReadCount.load(std::memory_order_relaxed);
         const auto readable = w - r;
-        assert(readable >= count);
+        Expects(readable >= count);
 
         const auto to_read = std::min(count, readable);
         const auto read_idx = r & mSizeMask;
@@ -627,13 +507,13 @@ public:
     {
         const auto w = mWriteCount.load(std::memory_order_relaxed);
         const auto r = mReadCount.load(std::memory_order_acquire);
-        const auto writable [[maybe_unused]] = mWriteSize - (w - r);
-        assert(writable >= count);
+        const auto writable = mWriteSize - (w - r);
+        Expects(writable >= count);
         mWriteCount.store(w+count, std::memory_order_release);
     }
 
 
-    static void Destroy(gsl::owner<FifoBuffer*> fifo) noexcept
+    NOINLINE static void Destroy(gsl::owner<FifoBuffer*> fifo) noexcept
     {
         fifo->~FifoBuffer();
         ::operator delete(fifo, std::align_val_t{alignof(FifoBuffer)});
@@ -649,9 +529,11 @@ public:
      * `limit_writes' is true, the writable space will be limited to `count'
      * elements regardless of the rounded size.
      */
-    [[nodiscard]] static
+    [[nodiscard]] NOINLINE static
     auto Create(std::size_t count, bool limit_writes) -> std::unique_ptr<FifoBuffer,Deleter>
     {
+        if(count > std::numeric_limits<std::size_t>::max()>>1)
+            throw std::overflow_error{"FIFO buffer size too large"};
         auto power_of_two = 0_uz;
         if(count > 0)
         {
@@ -661,12 +543,11 @@ public:
             power_of_two |= power_of_two>>4;
             power_of_two |= power_of_two>>8;
             power_of_two |= power_of_two>>16;
-            if constexpr(sizeof(size_t) > sizeof(uint32_t))
-                power_of_two |= power_of_two>>32;
+            if constexpr(sizeof(size_t) > sizeof(std::uint32_t))
+                power_of_two |= (power_of_two>>16) >> 16;
         }
         ++power_of_two;
-        if(power_of_two < count || power_of_two > std::numeric_limits<std::size_t>::max()>>1
-            || power_of_two > std::numeric_limits<std::size_t>::max()/sizeof(T))
+        if(power_of_two > std::numeric_limits<std::size_t>::max()/sizeof(T) - sizeof(FifoBuffer))
             throw std::overflow_error{"FIFO buffer size overflow"};
 
         const auto numbytes = sizeof(FifoBuffer) + power_of_two*sizeof(T);

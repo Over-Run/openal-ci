@@ -4,7 +4,9 @@
 #include <chrono>
 #include <cstdarg>
 #include <cstddef>
+#include <format>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -12,10 +14,11 @@
 #include "alc/events.h"
 #include "core/device.h"
 #include "core/except.h"
-#include "fmt/core.h"
-
+#include "gsl/gsl"
+#include "opthelpers.h"
 
 using uint = unsigned int;
+
 
 struct ClockLatency {
     std::chrono::nanoseconds ClockTime;
@@ -25,22 +28,22 @@ struct ClockLatency {
 struct BackendBase {
     virtual void open(std::string_view name) = 0;
 
-    virtual bool reset();
+    virtual auto reset() -> bool;
     virtual void start() = 0;
     virtual void stop() = 0;
 
-    virtual void captureSamples(std::byte *buffer, uint samples);
-    virtual uint availableSamples();
+    virtual void captureSamples(std::span<std::byte> outbuffer);
+    virtual auto availableSamples() -> uint;
 
-    virtual ClockLatency getClockLatency();
+    virtual auto getClockLatency() -> ClockLatency;
 
-    DeviceBase *const mDevice;
+    gsl::not_null<DeviceBase*> const mDevice;
     std::string mDeviceName;
 
     BackendBase() = delete;
     BackendBase(const BackendBase&) = delete;
     BackendBase(BackendBase&&) = delete;
-    explicit BackendBase(DeviceBase *device) noexcept : mDevice{device} { }
+    explicit BackendBase(gsl::not_null<DeviceBase*> device) noexcept : mDevice{device} { }
     virtual ~BackendBase() = default;
 
     void operator=(const BackendBase&) = delete;
@@ -89,7 +92,8 @@ struct BackendFactory {
 
     virtual auto enumerate(BackendType type) -> std::vector<std::string> = 0;
 
-    virtual auto createBackend(DeviceBase *device, BackendType type) -> BackendPtr = 0;
+    virtual auto createBackend(gsl::not_null<DeviceBase*> device, BackendType type) -> BackendPtr
+        = 0;
 };
 
 namespace al {
@@ -100,19 +104,20 @@ enum class backend_error {
     OutOfMemory
 };
 
+/* NOLINTNEXTLINE(clazy-copyable-polymorphic) Exceptions must be copyable. */
 class backend_exception final : public base_exception {
     backend_error mErrorCode;
 
-    static auto make_string(fmt::string_view fmt, fmt::format_args args) -> std::string;
+    static auto make_string(std::string_view fmt, std::format_args args) -> std::string;
 
 public:
     template<typename ...Args>
-    backend_exception(backend_error code, fmt::format_string<Args...> fmt, Args&& ...args)
-        : base_exception{make_string(fmt, fmt::make_format_args(args...))}, mErrorCode{code}
+    backend_exception(backend_error code, std::format_string<Args...> fmt, Args&& ...args)
+        : base_exception{make_string(fmt.get(), std::make_format_args(args...))}, mErrorCode{code}
     { }
     backend_exception(const backend_exception&) = default;
     backend_exception(backend_exception&&) = default;
-    ~backend_exception() override;
+    NOINLINE ~backend_exception() override = default;
 
     backend_exception& operator=(const backend_exception&) = default;
     backend_exception& operator=(backend_exception&&) = default;

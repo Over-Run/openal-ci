@@ -91,7 +91,21 @@ jobs:
       #     sudo apt-get update || true
       - name: Prepare cross-compilation for ${{matrix.CROSS_ARCH}}
         run: |
-          sudo cp /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list.d/${{matrix.CROSS_ARCH}}.sources
+          cat << EOF | sudo tee /etc/apt/sources.list.d/${{matrix.CROSS_ARCH}}.sources
+          Types: deb
+          URIs: https://ports.ubuntu.com/
+          Suites: noble noble-updates noble-backports
+          Components: main universe restricted multiverse
+          Architectures: ${{matrix.CROSS_ARCH}}
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+
+          Types: deb
+          URIs: https://ports.ubuntu.com/
+          Suites: noble-security
+          Components: main universe restricted multiverse
+          Architectures: ${{matrix.CROSS_ARCH}}
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+          EOF
           sudo sed -i 's/Architectures: amd64/Architectures: ${{matrix.CROSS_ARCH}}/g' /etc/apt/sources.list.d/${{matrix.CROSS_ARCH}}.sources
           sudo dpkg --add-architecture ${{matrix.CROSS_ARCH}}
           sudo apt-get update || true

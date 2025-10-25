@@ -112,7 +112,7 @@ jobs:
       - name: Install libglib
         if: ${{ matrix.CROSS_ARCH == 'armhf' }}
         run: |
-          sudo aptitude install libglib2.0-dev
+          sudo apt-get install libglib2.0-dev
       - name: Install cross-compilation dependencies
         run: DEBIAN_FRONTEND=noninteractive sudo apt-get -yq --allow-unauthenticated install libpulse-dev:${{matrix.CROSS_ARCH}} portaudio19-dev:${{matrix.CROSS_ARCH}} libasound2-dev:${{matrix.CROSS_ARCH}} libjack-dev:${{matrix.CROSS_ARCH}} libdbus-1-dev:${{matrix.CROSS_ARCH}} -o Dpkg::Options::="--force-overwrite"
         #libpipewire-0.3-dev:${{matrix.CROSS_ARCH}}

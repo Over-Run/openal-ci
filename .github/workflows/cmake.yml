@@ -94,19 +94,13 @@ jobs:
           cat <<EOF > deb822sources
           Types: deb
           URIs: http://archive.ubuntu.com/ubuntu/
-          Suites: noble
-          Components: main restricted universe
+          Suites: noble noble-updates noble-security noble-backports
+          Components: main restricted multiverse universe
           Architectures: amd64
           
           Types: deb
           URIs: http://security.ubuntu.com/ubuntu/
           Suites: noble-security
-          Components: main restricted universe
-          Architectures: amd64
-          
-          Types: deb
-          URIs: http://archive.ubuntu.com/ubuntu/
-          Suites: noble-updates
           Components: main restricted universe
           Architectures: amd64
           

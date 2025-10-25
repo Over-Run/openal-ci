@@ -249,6 +249,7 @@ constexpr auto X714ChanMap = pa_channel_map{12, {
 
 
 /* NOLINTBEGIN(*EnumCastOutOfRange) *grumble* Don't use enums for bitflags. */
+[[nodiscard]]
 constexpr auto operator|(pa_stream_flags_t lhs, pa_stream_flags_t rhs) -> pa_stream_flags_t
 { return gsl::narrow_cast<pa_stream_flags_t>(lhs | al::to_underlying(rhs)); }
 constexpr auto operator|=(pa_stream_flags_t &lhs, pa_stream_flags_t rhs) -> pa_stream_flags_t&
@@ -256,6 +257,7 @@ constexpr auto operator|=(pa_stream_flags_t &lhs, pa_stream_flags_t rhs) -> pa_s
     lhs = lhs | rhs;
     return lhs;
 }
+[[nodiscard]]
 constexpr auto operator~(pa_stream_flags_t flag) -> pa_stream_flags_t
 { return gsl::narrow_cast<pa_stream_flags_t>(~al::to_underlying(flag)); }
 constexpr auto operator&=(pa_stream_flags_t &lhs, pa_stream_flags_t rhs) -> pa_stream_flags_t&
@@ -264,6 +266,7 @@ constexpr auto operator&=(pa_stream_flags_t &lhs, pa_stream_flags_t rhs) -> pa_s
     return lhs;
 }
 
+[[nodiscard]]
 constexpr auto operator|(pa_context_flags_t lhs, pa_context_flags_t rhs) -> pa_context_flags_t
 { return gsl::narrow_cast<pa_context_flags_t>(lhs | al::to_underlying(rhs)); }
 constexpr auto operator|=(pa_context_flags_t &lhs, pa_context_flags_t rhs) -> pa_context_flags_t&
@@ -272,6 +275,7 @@ constexpr auto operator|=(pa_context_flags_t &lhs, pa_context_flags_t rhs) -> pa
     return lhs;
 }
 
+[[nodiscard]]
 constexpr auto operator|(pa_subscription_mask_t lhs, pa_subscription_mask_t rhs)
     -> pa_subscription_mask_t
 { return gsl::narrow_cast<pa_subscription_mask_t>(lhs | al::to_underlying(rhs)); }
@@ -391,7 +395,7 @@ public:
 
         const auto &newentry = PlaybackDevices.emplace_back(DevMap{std::move(newname),
             info->name, info->index});
-        TRACE("Got device \"{}\", \"{}\" ({})", newentry.name, newentry.device_name,
+        TRACE(R"(Got device "{}", "{}" ({}))", newentry.name, newentry.device_name,
             newentry.index);
 
         const auto msg = std::format("Device added: {}", newentry.device_name);
@@ -420,7 +424,7 @@ public:
 
         const auto &newentry = CaptureDevices.emplace_back(DevMap{std::move(newname), info->name,
             info->index});
-        TRACE("Got device \"{}\", \"{}\" ({})", newentry.name, newentry.device_name,
+        TRACE(R"(Got device "{}", "{}" ({}))", newentry.name, newentry.device_name,
             newentry.index);
 
         const auto msg = std::format("Device added: {}", newentry.device_name);
@@ -435,11 +439,11 @@ public:
         if(eventFacility == PA_SUBSCRIPTION_EVENT_SERVER
             && eventType == PA_SUBSCRIPTION_EVENT_CHANGE)
         {
-            static constexpr auto server_cb = [](pa_context *ctx, const pa_server_info *info,
-                void *pdata) noexcept
+            static constexpr auto server_cb = [](pa_context *const ctx,
+                pa_server_info const *const info, void *const pdata) noexcept
             { return static_cast<PulseMainloop*>(pdata)->updateDefaultDevice(ctx, info); };
-            auto *op = pa_context_get_server_info(context, server_cb, this);
-            if(op) pa_operation_unref(op);
+            if(auto *const op = pa_context_get_server_info(context, server_cb, this))
+                pa_operation_unref(op);
         }
 
         if(eventFacility != PA_SUBSCRIPTION_EVENT_SINK
@@ -453,19 +457,22 @@ public:
         {
             if(eventFacility == PA_SUBSCRIPTION_EVENT_SINK)
             {
-                static constexpr auto devcallback = [](pa_context *ctx, const pa_sink_info *info,
-                    int eol, void *pdata) noexcept
+                static constexpr auto devcallback = [](pa_context *const ctx,
+                    pa_sink_info const *const info, int const eol, void *const pdata) noexcept
                 { return static_cast<PulseMainloop*>(pdata)->deviceSinkCallback(ctx, info, eol); };
-                auto *op = pa_context_get_sink_info_by_index(context, idx, devcallback, this);
-                if(op) pa_operation_unref(op);
+                if(auto *op = pa_context_get_sink_info_by_index(context, idx, devcallback, this))
+                    pa_operation_unref(op);
             }
             else
             {
-                static constexpr auto devcallback = [](pa_context *ctx, const pa_source_info *info,
-                    int eol, void *pdata) noexcept
-                { return static_cast<PulseMainloop*>(pdata)->deviceSourceCallback(ctx,info,eol); };
-                auto *op = pa_context_get_source_info_by_index(context, idx, devcallback, this);
-                if(op) pa_operation_unref(op);
+                static constexpr auto devcallback = [](pa_context *const ctx,
+                    pa_source_info const *const info, int const eol, void *const pdata) noexcept
+                {
+                    return static_cast<PulseMainloop*>(pdata)->deviceSourceCallback(ctx, info,
+                        eol);
+                };
+                if(auto *op = pa_context_get_source_info_by_index(context, idx, devcallback, this))
+                    pa_operation_unref(op);
             }
         }
         else if(eventType == PA_SUBSCRIPTION_EVENT_REMOVE)
@@ -572,7 +579,6 @@ struct MainloopUniqueLock : public std::unique_lock<PulseMainloop> {
             spec, chanmap, type);
     }
 };
-using MainloopLockGuard = std::lock_guard<PulseMainloop>;
 
 PulseMainloop::~PulseMainloop()
 {
@@ -1425,33 +1431,43 @@ auto PulseCapture::getClockLatency() -> ClockLatency
     return ret;
 }
 
-} // namespace
+#ifdef _WIN32
+#define PULSE_LIB "libpulse-0.dll"
+#elif defined(__APPLE__) && defined(__MACH__)
+#define PULSE_LIB "libpulse.0.dylib"
+#else
+#define PULSE_LIB "libpulse.so.0"
+#endif
 
+#if HAVE_DYNLOAD
+OAL_ELF_NOTE_DLOPEN(
+    "backend-pulseaudio",
+    "Support for the PulseAudio backend",
+    OAL_ELF_NOTE_DLOPEN_PRIORITY_RECOMMENDED,
+    PULSE_LIB
+);
+#endif
+
+} // namespace
 
 auto PulseBackendFactory::init() -> bool
 {
 #if HAVE_DYNLOAD
     if(!pulse_handle)
     {
-#ifdef _WIN32
-        auto *libname = "libpulse-0.dll";
-#elif defined(__APPLE__) && defined(__MACH__)
-        auto *libname = "libpulse.0.dylib";
-#else
-        auto *libname = "libpulse.so.0";
-#endif
-        if(auto libresult = LoadLib(libname))
+        auto *const pulse_lib = gsl::czstring{PULSE_LIB};
+        if(auto const libresult = LoadLib(pulse_lib))
             pulse_handle = libresult.value();
         else
         {
-            WARN("Failed to load {}: {}", libname, libresult.error());
+            WARN("Failed to load {}: {}", pulse_lib, libresult.error());
             return false;
         }
 
-        static constexpr auto load_func = [](auto *&func, const char *name) -> bool
+        static constexpr auto load_func = [](auto *&func, gsl::czstring const name) -> bool
         {
             using func_t = std::remove_reference_t<decltype(func)>;
-            auto funcresult = GetSymbol(pulse_handle, name);
+            auto const funcresult = GetSymbol(pulse_handle, name);
             if(!funcresult)
             {
                 WARN("Failed to load function {}: {}", name, funcresult.error());

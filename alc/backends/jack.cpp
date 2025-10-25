@@ -110,23 +110,34 @@ decltype(jack_error_callback) * pjack_error_callback;
 
 jack_options_t ClientOptions = JackNullOption;
 
+#if defined(_WIN64)
+#define JACK_LIB "libjack64.dll"
+#elif defined(_WIN32)
+#define JACK_LIB "libjack.dll"
+#else
+#define JACK_LIB "libjack.so.0"
+#endif
+
+#if HAVE_DYNLOAD
+OAL_ELF_NOTE_DLOPEN(
+    "backend-jack",
+    "Support for the JACK backend",
+    OAL_ELF_NOTE_DLOPEN_PRIORITY_SUGGESTED,
+    JACK_LIB
+);
+#endif
+
 auto jack_load() -> bool
 {
 #if HAVE_DYNLOAD
     if(!jack_handle)
     {
-#if defined(_WIN64)
-#define JACKLIB "libjack64.dll"
-#elif defined(_WIN32)
-#define JACKLIB "libjack.dll"
-#else
-#define JACKLIB "libjack.so.0"
-#endif
-        if(auto libresult = LoadLib(JACKLIB))
+        const char *jack_lib = JACK_LIB;
+        if(auto libresult = LoadLib(jack_lib))
             jack_handle = libresult.value();
         else
         {
-            WARN("Failed to load {}: {}", JACKLIB, libresult.error());
+            WARN("Failed to load {}: {}", jack_lib, libresult.error());
             return false;
         }
 
@@ -498,7 +509,7 @@ bool JackPlayback::reset()
     else
     {
         const auto devname = std::string_view{mDevice->mDeviceName};
-        auto bufsize = ConfigValueUInt(devname, "jack", "buffer-size")
+        auto bufsize = ConfigValueU32(devname, "jack", "buffer-size")
             .value_or(mDevice->mUpdateSize);
         bufsize = std::max(NextPowerOf2(bufsize), mDevice->mUpdateSize);
         mDevice->mBufferSize = bufsize + mDevice->mUpdateSize;
@@ -574,7 +585,7 @@ void JackPlayback::start()
                 return false;
             }
             if(jack_connect(mClient, jack_port_name(port), portname))
-                ERR("Failed to connect output port \"{}\" to \"{}\"", jack_port_name(port),
+                ERR(R"(Failed to connect output port "{}" to "{}")", jack_port_name(port),
                     portname);
             return true;
         });
@@ -593,7 +604,7 @@ void JackPlayback::start()
         mPlaying.store(true, std::memory_order_release);
     else
     {
-        auto bufsize = ConfigValueUInt(devname, "jack", "buffer-size")
+        auto bufsize = ConfigValueU32(devname, "jack", "buffer-size")
             .value_or(mDevice->mUpdateSize);
         bufsize = std::max(NextPowerOf2(bufsize), mDevice->mUpdateSize) / mDevice->mUpdateSize;
         mDevice->mBufferSize = (bufsize+1) * mDevice->mUpdateSize;

@@ -1715,15 +1715,15 @@ auto ProcessSources(TokenReaderT *tr, HrirDataT *hData, const uint outRate) -> b
 {
     const auto channels = (hData->mChannelType == CT_STEREO) ? 2u : 1u;
     hData->mHrirsBase.resize(size_t{channels} * hData->mIrCount * hData->mIrSize);
-    const auto hrirs = std::span<double>{hData->mHrirsBase};
-    auto hrir = std::vector<double>(hData->mIrSize);
+    const auto hrirs = std::span{hData->mHrirsBase};
+    auto hrir = std::vector(hData->mIrSize, 0.0);
     uint line;
     uint col;
     uint fi;
     uint ei;
     uint ai;
 
-    auto onsetSamples = std::vector<double>(size_t{OnsetRateMultiple} * hData->mIrPoints);
+    auto onsetSamples = std::vector(size_t{OnsetRateMultiple}*hData->mIrPoints, 0.0);
     auto onsetResampler = PPhaseResampler{};
     onsetResampler.init(hData->mIrRate, OnsetRateMultiple*hData->mIrRate);
 
@@ -1789,12 +1789,12 @@ auto ProcessSources(TokenReaderT *tr, HrirDataT *hData, const uint outRate) -> b
                 src.mChannel = 0;
             }
 
-            MYSOFA_EASY *sofa{LoadSofaFile(&src, hData->mIrRate, hData->mIrPoints)};
+            auto const *const sofa = LoadSofaFile(&src, hData->mIrRate, hData->mIrPoints);
             if(!sofa) return false;
 
             const auto srcPosValues = std::span{sofa->hrtf->SourcePosition.values,
                 sofa->hrtf->M*3_uz};
-            for(uint si{0};si < sofa->hrtf->M;++si)
+            for(auto const si : std::views::iota(0u, sofa->hrtf->M))
             {
                 fmt::print("\rLoading sources... {} of {}", si+1, sofa->hrtf->M);
                 std::cout.flush();

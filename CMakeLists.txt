@@ -33,6 +33,13 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "WindowsStore")
     set(ALSOFT_UWP TRUE)
 endif()
 
+# Don't mistake macOS for unix
+if(UNIX AND NOT ANDROID AND NOT APPLE AND NOT RISCOS AND NOT HAIKU)
+  set(UNIX_ELF ON)
+else()
+  set(UNIX_ELF OFF)
+endif()
+
 project(OpenAL
     VERSION 1.24.3
     LANGUAGES C CXX)
@@ -76,6 +83,7 @@ find_package(PkgConfig)
 find_package(SDL3 QUIET)
 
 option(ALSOFT_DLOPEN  "Check for the dlopen API for loading optional libs"  ON)
+option(ALSOFT_DLOPEN_NOTES  "Record dlopen dependencies in .note.dlopen section"  ${UNIX_ELF})
 
 option(ALSOFT_WERROR  "Treat compile warnings as errors"      OFF)
 
@@ -328,7 +336,10 @@ if(MSVC)
     endif()
     # C4127 - conditional expression is constant
     # C4324 - structure was padded due to alignment specifier
-    set(C_FLAGS ${C_FLAGS} /W4 /wd4127 /wd4324 /utf-8 $<$<COMPILE_LANGUAGE:CXX>:/EHsc>)
+    # C4373 - virtual function overrides 'base_function', previous versions of
+    #         the compiler did not override when parameters only differed by
+    #         const/volatile qualifiers
+    set(C_FLAGS ${C_FLAGS} /W4 /wd4127 /wd4324 /wd4373 /utf-8 $<$<COMPILE_LANGUAGE:CXX>:/EHsc>)
 
     if(NOT DXSDK_DIR)
         string(REGEX REPLACE "\\\\" "/" DXSDK_DIR "$ENV{DXSDK_DIR}")
@@ -347,6 +358,11 @@ else()
     # https://gcc.gnu.org/bugzilla/show_bug.cgi?id=93008
     set(C_FLAGS ${C_FLAGS} -Wunused -Wall -Wextra -Wshadow -Wconversion -Wcast-align -Wpedantic
         $<$<COMPILE_LANGUAGE:CXX>:-Wold-style-cast -Wnon-virtual-dtor -Woverloaded-virtual>)
+
+    check_cxx_compiler_flag(-Warith-conversion HAVE_WARITH_CONVERSION)
+    if(HAVE_WARITH_CONVERSION)
+        set(C_FLAGS ${C_FLAGS} -Warith-conversion)
+    endif()
 
     check_cxx_compiler_flag(-Wno-interference-size HAVE_WNO_INTERFERENCE_SIZE)
     if(HAVE_WNO_INTERFERENCE_SIZE)
@@ -670,10 +686,12 @@ set(COMMON_OBJS
     common/althrd_setname.cpp
     common/althrd_setname.h
     common/althreads.h
+    common/altypes.hpp
     common/atomic.h
     common/comptr.h
     common/dynload.cpp
     common/dynload.h
+    common/dlopennote.h
     common/expected.hpp
     common/filesystem.cpp
     common/filesystem.h
@@ -718,7 +736,6 @@ set(CORE_OBJS
     core/bsinc_tables.cpp
     core/bsinc_tables.h
     core/bufferline.h
-    core/buffer_storage.cpp
     core/buffer_storage.h
     core/context.cpp
     core/context.h
@@ -783,8 +800,7 @@ if(NOT WIN32)
         endif()
         if(DBus1_FOUND OR DBUS_FOUND)
             set(HAVE_RTKIT 1)
-            set(CORE_OBJS ${CORE_OBJS} core/dbus_wrap.cpp core/dbus_wrap.h
-                core/rtkit.cpp core/rtkit.h)
+            set(CORE_OBJS ${CORE_OBJS} core/rtkit.cpp core/rtkit.h)
             if(NOT DBus1_FOUND)
                 set(INC_PATHS ${INC_PATHS} ${DBUS_INCLUDE_DIRS})
                 set(CPP_DEFS ${CPP_DEFS} ${DBUS_CFLAGS_OTHER})
@@ -1432,6 +1448,26 @@ if(LIBTYPE STREQUAL "STATIC")
             set(PKG_CONFIG_PRIVATE_LIBS "${PKG_CONFIG_PRIVATE_LIBS} -l${FLAG}")
         endif()
     endforeach()
+endif()
+
+if(UNIX_ELF)
+  if(ALSOFT_DLOPEN_NOTES)
+    set(CHECK_ELF_DLNOTES_SRC [==[
+    #ifndef __ELF__
+      ELF DL notes is only supported on ELF platforms
+    #endif
+    __attribute__ ((used,aligned(4),section(".note.dlopen"))) static const struct {
+      struct { int a; int b; int c; } hdr; char name[4]; __attribute__((aligned(4))) char json[24];
+    } dlnote = { { 4, 0x407c0c0aU, 16 }, "FDO", "[\\"a\\":{\\"a\\":\\"1\\",\\"b\\":\\"2\\"}]" };
+    int main(int argc, char *argv[]) {
+      return argc + dlnote.hdr.a;
+    }
+    ]==])
+    check_c_source_compiles("${CHECK_ELF_DLNOTES_SRC}" COMPILER_SUPPORTS_ELFNOTES)
+    if(COMPILER_SUPPORTS_ELFNOTES)
+      set(HAVE_DLOPEN_NOTES TRUE)
+    endif()
+  endif()
 endif()
 
 # End configuration

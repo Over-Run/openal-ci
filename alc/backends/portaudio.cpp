@@ -201,7 +201,7 @@ void PortPlayback::open(std::string_view name)
     auto deviceid = PaDeviceIndex{-1};
     if(name.empty())
     {
-        if(const auto devidopt = ConfigValueInt({}, "port", "device"))
+        if(const auto devidopt = ConfigValueI32({}, "port", "device"))
             deviceid = *devidopt;
         if(deviceid < 0 || std::cmp_greater_equal(deviceid, DeviceNames.size()))
             deviceid = Pa_GetDefaultOutputDevice();
@@ -334,7 +334,7 @@ void PortCapture::open(std::string_view name)
     auto deviceid = PaDeviceIndex{};
     if(name.empty())
     {
-        if(auto devidopt = ConfigValueInt({}, "port", "capture"))
+        if(auto const devidopt = ConfigValueI32({}, "port", "capture"))
             deviceid = *devidopt;
         if(deviceid < 0 || std::cmp_greater_equal(deviceid, DeviceNames.size()))
             deviceid = Pa_GetDefaultInputDevice();
@@ -410,36 +410,45 @@ uint PortCapture::availableSamples()
 void PortCapture::captureSamples(std::span<std::byte> outbuffer)
 { std::ignore = mRing->read(outbuffer); }
 
-} // namespace
+#ifdef _WIN32
+# define PA_LIB "portaudio.dll"
+#elif defined(__APPLE__) && defined(__MACH__)
+# define PA_LIB "libportaudio.2.dylib"
+#elif defined(__OpenBSD__)
+# define PA_LIB "libportaudio.so"
+#else
+# define PA_LIB "libportaudio.so.2"
+#endif
 
+#if HAVE_DYNLOAD
+OAL_ELF_NOTE_DLOPEN(
+    "backend-portaudio",
+    "Support for the PortAudio backend",
+    OAL_ELF_NOTE_DLOPEN_PRIORITY_SUGGESTED,
+    PA_LIB
+);
+#endif
+
+} // namespace
 
 bool PortBackendFactory::init()
 {
 #if HAVE_DYNLOAD
     if(!pa_handle)
     {
-#ifdef _WIN32
-# define PALIB "portaudio.dll"
-#elif defined(__APPLE__) && defined(__MACH__)
-# define PALIB "libportaudio.2.dylib"
-#elif defined(__OpenBSD__)
-# define PALIB "libportaudio.so"
-#else
-# define PALIB "libportaudio.so.2"
-#endif
-
-        if(auto libresult = LoadLib(PALIB))
+        auto *const pa_lib = gsl::czstring{PA_LIB};
+        if(auto const libresult = LoadLib(pa_lib))
             pa_handle = libresult.value();
         else
         {
-            WARN("Failed to load {}: {}", PALIB, libresult.error());
+            WARN("Failed to load {}: {}", pa_lib, libresult.error());
             return false;
         }
 
-        static constexpr auto load_func = [](auto *&func, const char *name) -> bool
+        static constexpr auto load_func = [](auto *&func, gsl::czstring const name) -> bool
         {
             using func_t = std::remove_reference_t<decltype(func)>;
-            auto funcresult = GetSymbol(pa_handle, name);
+            auto const funcresult = GetSymbol(pa_handle, name);
             if(!funcresult)
             {
                 WARN("Failed to load function {}: {}", name, funcresult.error());
@@ -504,7 +513,7 @@ auto PortBackendFactory::enumerate(BackendType type) -> std::vector<std::string>
     {
     case BackendType::Playback:
         defaultid = Pa_GetDefaultOutputDevice();
-        if(auto devidopt = ConfigValueInt({}, "port", "device"); devidopt && *devidopt >= 0
+        if(auto const devidopt = ConfigValueI32({}, "port", "device"); devidopt && *devidopt >= 0
             && std::cmp_less(*devidopt, DeviceNames.size()))
             defaultid = *devidopt;
 
@@ -522,7 +531,7 @@ auto PortBackendFactory::enumerate(BackendType type) -> std::vector<std::string>
 
     case BackendType::Capture:
         defaultid = Pa_GetDefaultInputDevice();
-        if(auto devidopt = ConfigValueInt({}, "port", "capture"); devidopt && *devidopt >= 0
+        if(auto devidopt = ConfigValueI32({}, "port", "capture"); devidopt && *devidopt >= 0
             && std::cmp_less(*devidopt, DeviceNames.size()))
             defaultid = *devidopt;
 

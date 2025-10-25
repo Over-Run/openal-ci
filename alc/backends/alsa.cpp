@@ -302,7 +302,7 @@ auto probe_devices(snd_pcm_stream_t stream) -> std::vector<DevMap>
             {
                 const auto &entry = devlist.emplace_back(customdevs->substr(curpos, seppos-curpos),
                     customdevs->substr(seppos+1, nextpos-seppos-1));
-                TRACE("Got device \"{}\", \"{}\"", entry.name, entry.device_name);
+                TRACE(R"(Got device "{}", "{}")", entry.name, entry.device_name);
             }
 
             if(nextpos < customdevs->length())
@@ -369,7 +369,7 @@ auto probe_devices(snd_pcm_stream_t stream) -> std::vector<DevMap>
             auto device = std::format("{}CARD={},DEV={}", device_prefix, cardid, dev);
             
             const auto &entry = devlist.emplace_back(std::move(name), std::move(device));
-            TRACE("Got device \"{}\", \"{}\"", entry.name, entry.device_name);
+            TRACE(R"(Got device "{}", "{}")", entry.name, entry.device_name);
         }
     }
     if(err < 0)
@@ -1143,26 +1143,37 @@ auto AlsaCapture::getClockLatency() -> ClockLatency
     return ret;
 }
 
-} // namespace
+#define ALSA_LIB "libasound.so.2"
 
+#if HAVE_DYNLOAD
+OAL_ELF_NOTE_DLOPEN(
+    "backend-alsa",
+    "Support for the ALSA backend",
+    OAL_ELF_NOTE_DLOPEN_PRIORITY_SUGGESTED,
+    ALSA_LIB
+);
+#endif
+
+} // namespace
 
 auto AlsaBackendFactory::init() -> bool
 {
 #if HAVE_DYNLOAD
     if(!alsa_handle)
     {
-        if(auto libresult = LoadLib("libasound.so.2"))
+        auto *const alsa_lib = gsl::czstring{ALSA_LIB};
+        if(auto const libresult = LoadLib(alsa_lib))
             alsa_handle = libresult.value();
         else
         {
-            WARN("Failed to load {}: {}", "libasound.so.2", libresult.error());
+            WARN("Failed to load {}: {}", alsa_lib, libresult.error());
             return false;
         }
 
-        static constexpr auto load_func = [](auto *&func, const char *name) -> bool
+        static constexpr auto load_func = [](auto *&func, gsl::czstring const name) -> bool
         {
             using func_t = std::remove_reference_t<decltype(func)>;
-            auto funcresult = GetSymbol(alsa_handle, name);
+            auto const funcresult = GetSymbol(alsa_handle, name);
             if(!funcresult)
             {
                 WARN("Failed to load function {}: {}", name, funcresult.error());

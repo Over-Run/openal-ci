@@ -10,3 +10,4 @@ win64build
 CMakeLists.txt.user*
 
 .vscode/
+__pycache__/

@@ -12,9 +12,13 @@
 
 #define HAVE_DYNLOAD 1
 
-auto LoadLib(const gsl::czstring name) -> al::expected<void*, std::string>;
+#include "dlopennote.h"
+
+[[nodiscard]]
+auto LoadLib(gsl::czstring name) -> al::expected<void*, std::string>;
 void CloseLib(void *handle);
-auto GetSymbol(void *handle, const gsl::czstring name) -> al::expected<void*, std::string>;
+[[nodiscard]]
+auto GetSymbol(void *handle, gsl::czstring name) -> al::expected<void*, std::string>;
 
 #else
 

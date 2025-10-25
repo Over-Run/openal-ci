@@ -37,7 +37,7 @@ struct ALbuffer;
 
 #if ALSOFT_EAX
 /* NOLINTNEXTLINE(clazy-copyable-polymorphic) Exceptions must be copyable. */
-class EaxFxSlotException : public EaxException {
+class EaxFxSlotException final : public EaxException {
 public:
     explicit EaxFxSlotException(const std::string_view message)
 		: EaxException{"EAX_FX_SLOT", message}
@@ -303,15 +303,13 @@ private:
 
     void eax4_fx_slot_set_defaults(EAX40FXSLOTPROPERTIES& props) const noexcept;
     void eax5_fx_slot_set_defaults(EAX50FXSLOTPROPERTIES& props) const noexcept;
-    void eax4_fx_slot_set_current_defaults(const EAX40FXSLOTPROPERTIES& props) noexcept;
-    void eax5_fx_slot_set_current_defaults(const EAX50FXSLOTPROPERTIES& props) noexcept;
-    void eax_fx_slot_set_current_defaults();
     void eax_fx_slot_set_defaults();
 
     static void eax4_fx_slot_get(const EaxCall& call, const EAX40FXSLOTPROPERTIES& props);
     static void eax5_fx_slot_get(const EaxCall& call, const EAX50FXSLOTPROPERTIES& props);
     void eax_fx_slot_get(const EaxCall& call) const;
     // Returns `true` if all sources should be updated, or `false` otherwise.
+    [[nodiscard]]
     auto eax_get(const EaxCall& call) const -> bool;
 
     void eax_fx_slot_load_effect(int version, ALenum altype) const;

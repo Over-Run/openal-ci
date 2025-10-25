@@ -59,7 +59,7 @@ struct ALbufferQueueItem : public VoiceBufferItem {
 
 #if ALSOFT_EAX
 /* NOLINTNEXTLINE(clazy-copyable-polymorphic) Exceptions must be copyable. */
-class EaxSourceException : public EaxException {
+class EaxSourceException final : public EaxException {
 public:
     explicit EaxSourceException(const std::string_view message)
         : EaxException{"EAX_SOURCE", message}
@@ -191,14 +191,14 @@ private:
 
     using EaxFxSlotIds = std::array<const GUID*,EAX_MAX_FXSLOTS>;
 
-    static constexpr const EaxFxSlotIds eax4_fx_slot_ids{
+    static constexpr auto eax4_fx_slot_ids = EaxFxSlotIds{
         &EAXPROPERTYID_EAX40_FXSlot0,
         &EAXPROPERTYID_EAX40_FXSlot1,
         &EAXPROPERTYID_EAX40_FXSlot2,
         &EAXPROPERTYID_EAX40_FXSlot3,
     };
 
-    static constexpr const EaxFxSlotIds eax5_fx_slot_ids{
+    static constexpr auto eax5_fx_slot_ids = EaxFxSlotIds{
         &EAXPROPERTYID_EAX50_FXSlot0,
         &EAXPROPERTYID_EAX50_FXSlot1,
         &EAXPROPERTYID_EAX50_FXSlot2,

@@ -115,8 +115,6 @@ jobs:
 
           sudo dpkg --add-architecture ${{matrix.CROSS_ARCH}}
           sudo apt-get update || true
-      - run: sudo apt-get install python3-packaging:${{matrix.CROSS_ARCH}}
-        if: ${{ matrix.CROSS_ARCH == 'armhf' || matrix.CROSS_ARCH == 'riscv64' }}
       - name: Install cross-compilation dependencies
         run: DEBIAN_FRONTEND=noninteractive sudo apt-get -yq --allow-unauthenticated install libpulse-dev:${{matrix.CROSS_ARCH}} portaudio19-dev:${{matrix.CROSS_ARCH}} libasound2-dev:${{matrix.CROSS_ARCH}} libjack-dev:${{matrix.CROSS_ARCH}} libdbus-1-dev:${{matrix.CROSS_ARCH}} -o Dpkg::Options::="--force-overwrite"
         #libpipewire-0.3-dev:${{matrix.CROSS_ARCH}}

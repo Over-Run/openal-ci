@@ -112,13 +112,7 @@ jobs:
           
           Types: deb
           URIs: http://azure.ports.ubuntu.com/ubuntu-ports/
-          Suites: noble
-          Components: main restricted multiverse universe
-          Architectures: ${{matrix.CROSS_ARCH}}
-          
-          Types: deb
-          URIs: http://azure.ports.ubuntu.com/ubuntu-ports/
-          Suites: noble-updates
+          Suites: nobel noble-updates noble-security noble-backports
           Components: main restricted multiverse universe
           Architectures: ${{matrix.CROSS_ARCH}}
           EOF
@@ -127,6 +121,7 @@ jobs:
 
           sudo dpkg --add-architecture ${{matrix.CROSS_ARCH}}
           sudo apt-get update || true
+      - run: apt-cache show libglib2.0-dev-bin:${{matrix.CROSS_ARCH}}
       - name: Install cross-compilation dependencies
         run: DEBIAN_FRONTEND=noninteractive sudo apt-get -yq --allow-unauthenticated install libpulse-dev:${{matrix.CROSS_ARCH}} portaudio19-dev:${{matrix.CROSS_ARCH}} libasound2-dev:${{matrix.CROSS_ARCH}} libjack-dev:${{matrix.CROSS_ARCH}} libdbus-1-dev:${{matrix.CROSS_ARCH}} -o Dpkg::Options::="--force-overwrite"
         #libpipewire-0.3-dev:${{matrix.CROSS_ARCH}}

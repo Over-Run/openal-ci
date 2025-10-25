@@ -83,12 +83,12 @@ jobs:
           DEBIAN_FRONTEND=noninteractive sudo apt-get -yq install cmake gcc-${{matrix.TRIPLET}} g++-${{matrix.TRIPLET}} libc6-dev-${{matrix.CROSS_ARCH}}-cross
       - name: Install GCC 13
         run: |
-          echo "deb http://cz.archive.ubuntu.com/ubuntu mantic main" |
+          echo "deb http://cz.archive.ubuntu.com/ubuntu nobel main" |
           sudo tee /etc/apt/sources.list.d/temporary-repository.list
-          sudo apt update
+          sudo apt-get update
           sudo apt-get install gcc-13-${{matrix.TRIPLET}} g++-13-${{matrix.TRIPLET}}
           sudo rm /etc/apt/sources.list.d/temporary-repository.list
-          sudo apt update
+          sudo apt-get update
       - name: Set GCC 13 as default
         run: sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/${{matrix.TRIPLET}}-gcc-13 100 --slave /usr/bin/g++ g++ /usr/bin/${{matrix.TRIPLET}}-g++-13
       - name: Prepare cross-compilation for ${{matrix.CROSS_ARCH}}

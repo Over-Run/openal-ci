@@ -109,6 +109,10 @@ jobs:
           sudo sed -i 's/Architectures: amd64/Architectures: ${{matrix.CROSS_ARCH}}/g' /etc/apt/sources.list.d/${{matrix.CROSS_ARCH}}.sources
           sudo dpkg --add-architecture ${{matrix.CROSS_ARCH}}
           sudo apt-get update || true
+      - name: Install libglib
+        if: ${{ matrix.CROSS_ARCH == 'armhf' }}
+        run: |
+          sudo aptitude install libglib2.0-dev
       - name: Install cross-compilation dependencies
         run: DEBIAN_FRONTEND=noninteractive sudo apt-get -yq --allow-unauthenticated install libpulse-dev:${{matrix.CROSS_ARCH}} portaudio19-dev:${{matrix.CROSS_ARCH}} libasound2-dev:${{matrix.CROSS_ARCH}} libjack-dev:${{matrix.CROSS_ARCH}} libdbus-1-dev:${{matrix.CROSS_ARCH}} -o Dpkg::Options::="--force-overwrite"
         #libpipewire-0.3-dev:${{matrix.CROSS_ARCH}}

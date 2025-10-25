@@ -80,7 +80,8 @@ jobs:
       - name: Install dependencies
         run: |
           DEBIAN_FRONTEND=noninteractive sudo apt-get -yq update
-          DEBIAN_FRONTEND=noninteractive sudo apt-get -yq install cmake gcc-${{matrix.TRIPLET}} g++-${{matrix.TRIPLET}} libc6-dev-${{matrix.CROSS_ARCH}}-cross
+          DEBIAN_FRONTEND=noninteractive sudo apt-get -yq install cmake gcc-${{matrix.TRIPLET}} g++-${{matrix.TRIPLET}}
+        # libc6-dev-${{matrix.CROSS_ARCH}}-cross
       - name: Install GCC 13
         run: |
           echo "deb http://cz.archive.ubuntu.com/ubuntu noble main" |
@@ -91,6 +92,8 @@ jobs:
           sudo apt-get update
       - name: Set GCC 13 as default
         run: sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/${{matrix.TRIPLET}}-gcc-13 100 --slave /usr/bin/g++ g++ /usr/bin/${{matrix.TRIPLET}}-g++-13
+      - name: Install libc6
+        run: sudo apt-get install libc6-dev-${{matrix.CROSS_ARCH}}-cross
       - name: Prepare cross-compilation for ${{matrix.CROSS_ARCH}}
         run: |
           sudo sed -i 's/deb mirror/deb [arch=amd64,i386] mirror/' /etc/apt/sources.list

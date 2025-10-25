@@ -77,6 +77,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 3
+      - name: Install dependencies
+        run: |
+          DEBIAN_FRONTEND=noninteractive sudo apt-get -yq update
+          DEBIAN_FRONTEND=noninteractive sudo apt-get -yq install cmake gcc-${{matrix.TRIPLET}} g++-${{matrix.TRIPLET}} libc6-dev-${{matrix.CROSS_ARCH}}-cross
       # - name: Prepare cross-compilation for ${{matrix.CROSS_ARCH}}
       #   run: |
       #     sudo sed -i 's/deb mirror/deb [arch=amd64,i386] mirror/' /etc/apt/sources.list
@@ -87,27 +91,42 @@ jobs:
       #     sudo apt-get update || true
       - name: Prepare cross-compilation for ${{matrix.CROSS_ARCH}}
         run: |
-          cat << EOF | sudo tee /etc/apt/sources.list.d/${{matrix.CROSS_ARCH}}.sources
+          cat <<EOF > deb822sources
           Types: deb
-          URIs: https://ports.ubuntu.com/
-          Suites: noble noble-updates noble-backports
-          Components: main universe restricted multiverse
-          Architectures: ${{matrix.CROSS_ARCH}}
-          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
-
+          URIs: http://archive.ubuntu.com/ubuntu/
+          Suites: noble
+          Components: main restricted universe
+          Architectures: amd64
+          
           Types: deb
-          URIs: https://ports.ubuntu.com/
+          URIs: http://security.ubuntu.com/ubuntu/
           Suites: noble-security
-          Components: main universe restricted multiverse
+          Components: main restricted universe
+          Architectures: amd64
+          
+          Types: deb
+          URIs: http://archive.ubuntu.com/ubuntu/
+          Suites: noble-updates
+          Components: main restricted universe
+          Architectures: amd64
+          
+          Types: deb
+          URIs: http://azure.ports.ubuntu.com/ubuntu-ports/
+          Suites: noble
+          Components: main restricted multiverse universe
           Architectures: ${{matrix.CROSS_ARCH}}
-          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+          
+          Types: deb
+          URIs: http://azure.ports.ubuntu.com/ubuntu-ports/
+          Suites: noble-updates
+          Components: main restricted multiverse universe
+          Architectures: ${{matrix.CROSS_ARCH}}
           EOF
+  
+          sudo mv deb822sources /etc/apt/sources.list.d/ubuntu.sources
+
           sudo dpkg --add-architecture ${{matrix.CROSS_ARCH}}
           sudo apt-get update || true
-      - name: Install dependencies
-        run: |
-          DEBIAN_FRONTEND=noninteractive sudo apt-get -yq update
-          DEBIAN_FRONTEND=noninteractive sudo apt-get -yq install cmake gcc-${{matrix.TRIPLET}} g++-${{matrix.TRIPLET}} libc6-dev-${{matrix.CROSS_ARCH}}-cross
       - name: Install cross-compilation dependencies
         run: DEBIAN_FRONTEND=noninteractive sudo apt-get -yq --allow-unauthenticated install libpulse-dev:${{matrix.CROSS_ARCH}} portaudio19-dev:${{matrix.CROSS_ARCH}} libasound2-dev:${{matrix.CROSS_ARCH}} libjack-dev:${{matrix.CROSS_ARCH}} libdbus-1-dev:${{matrix.CROSS_ARCH}} -o Dpkg::Options::="--force-overwrite"
         #libpipewire-0.3-dev:${{matrix.CROSS_ARCH}}

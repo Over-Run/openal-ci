@@ -77,10 +77,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 3
-      - name: Install dependencies
-        run: |
-          DEBIAN_FRONTEND=noninteractive sudo apt-get -yq update
-          DEBIAN_FRONTEND=noninteractive sudo apt-get -yq install cmake gcc-${{matrix.TRIPLET}} g++-${{matrix.TRIPLET}} libc6-dev-${{matrix.CROSS_ARCH}}-cross
       # - name: Prepare cross-compilation for ${{matrix.CROSS_ARCH}}
       #   run: |
       #     sudo sed -i 's/deb mirror/deb [arch=amd64,i386] mirror/' /etc/apt/sources.list
@@ -108,11 +104,10 @@ jobs:
           EOF
           sudo dpkg --add-architecture ${{matrix.CROSS_ARCH}}
           sudo apt-get update || true
-      - name: Install libglib
-        if: ${{ matrix.CROSS_ARCH == 'armhf' }}
+      - name: Install dependencies
         run: |
-          sudo apt-get install libglib2.0-dev-bin:${{matrix.CROSS_ARCH}}=2.80.0-6ubuntu1
-          sudo apt-get install libglib2.0-dev:${{matrix.CROSS_ARCH}}
+          DEBIAN_FRONTEND=noninteractive sudo apt-get -yq update
+          DEBIAN_FRONTEND=noninteractive sudo apt-get -yq install cmake gcc-${{matrix.TRIPLET}} g++-${{matrix.TRIPLET}} libc6-dev-${{matrix.CROSS_ARCH}}-cross
       - name: Install cross-compilation dependencies
         run: DEBIAN_FRONTEND=noninteractive sudo apt-get -yq --allow-unauthenticated install libpulse-dev:${{matrix.CROSS_ARCH}} portaudio19-dev:${{matrix.CROSS_ARCH}} libasound2-dev:${{matrix.CROSS_ARCH}} libjack-dev:${{matrix.CROSS_ARCH}} libdbus-1-dev:${{matrix.CROSS_ARCH}} -o Dpkg::Options::="--force-overwrite"
         #libpipewire-0.3-dev:${{matrix.CROSS_ARCH}}

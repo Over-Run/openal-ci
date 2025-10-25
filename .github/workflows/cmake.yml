@@ -79,6 +79,7 @@ jobs:
           fetch-depth: 3
       - name: Install dependencies
         run: |
+          sudo add-apt-repository ppa:ubuntu-toolchain-r/test
           DEBIAN_FRONTEND=noninteractive sudo apt-get -yq update
           DEBIAN_FRONTEND=noninteractive sudo apt-get -yq install cmake gcc-13-${{matrix.TRIPLET}} g++-13-${{matrix.TRIPLET}} libc6-dev-${{matrix.CROSS_ARCH}}-cross
       - name: Set GCC 13 as default
